@@ -90,6 +90,8 @@ var GISCapture = (function() {
                 strokeWidth: 3
             },
             overlap: null,
+            // Nearby parcels configuration (READ-ONLY display)
+            nearbyParcels: null,
             onGeometryChange: null,
             onValidationError: null,
             onError: null
@@ -113,7 +115,12 @@ var GISCapture = (function() {
             overlaps: [],                // Array of overlapping records
             overlapChecked: false,       // Whether overlap check has been performed
             overlapConfirmed: false,     // Whether user confirmed saving with overlaps
-            overlapCheckPending: false   // Whether overlap check is in progress
+            overlapCheckPending: false,  // Whether overlap check is in progress
+            // Nearby parcels state (READ-ONLY display)
+            nearbyParcelsLoaded: false,
+            nearbyParcelsLoading: false,
+            nearbyParcelsVisible: false,
+            nearbyParcelsData: []        // Cached parcel data
         };
 
         // Map references
@@ -132,6 +139,12 @@ var GISCapture = (function() {
         this.overlapLayer = null;          // Layer group for existing polygons
         this.overlapHighlightLayer = null; // Layer for overlap intersection areas
         this.overlapPanel = null;          // Overlap warning panel element
+
+        // Nearby parcels display references (READ-ONLY)
+        this.nearbyParcelsLayer = null;    // Layer group for nearby parcels
+        this.nearbyParcelsToggle = null;   // Toggle button element
+        this.nearbyParcelsBadge = null;    // Count badge element
+        this.nearbyParcelsLegend = null;   // Legend element
 
         // Accessibility
         this.liveRegion = null;        // ARIA live region for announcements
@@ -239,6 +252,12 @@ var GISCapture = (function() {
             // Create overlap layers (below drawing layer)
             this.overlapLayer = L.layerGroup().addTo(this.map);
             this.overlapHighlightLayer = L.layerGroup().addTo(this.map);
+
+            // Initialize nearby parcels layer (READ-ONLY, below drawing layer)
+            if (this._isNearbyParcelsEnabled()) {
+                this._initNearbyParcelsLayer();
+                this._setupNearbyParcelsReload();
+            }
 
             // Add layer control if enabled
             if (this.options.showSatelliteOption) {
@@ -2719,6 +2738,455 @@ var GISCapture = (function() {
         // END OVERLAP CHECKING METHODS
         // =============================================
 
+        // =============================================
+        // NEARBY PARCELS DISPLAY METHODS (READ-ONLY)
+        // =============================================
+
+        /**
+         * Check if nearby parcels feature is enabled
+         */
+        _isNearbyParcelsEnabled: function() {
+            var config = this.options.nearbyParcels;
+            return config && config.enabled && config.enabled !== 'DISABLED';
+        },
+
+        /**
+         * Initialize nearby parcels layer.
+         * CRITICAL: This layer is READ-ONLY. All interactions are disabled
+         * to prevent any modification of existing parcels.
+         */
+        _initNearbyParcelsLayer: function() {
+            var self = this;
+            var config = this.options.nearbyParcels;
+
+            // Create layer group for nearby parcels (added BELOW drawing layer)
+            this.nearbyParcelsLayer = L.layerGroup();
+            this.nearbyParcelsLayer.addTo(this.map);
+
+            // Ensure nearby parcels layer is behind drawing layer
+            if (this.drawingLayer) {
+                this.drawingLayer.bringToFront();
+            }
+
+            // Add legend
+            this._addNearbyParcelsLegend();
+
+            // Load based on mode
+            if (config.enabled === 'ON_LOAD') {
+                // Load immediately
+                this._loadNearbyParcels();
+            } else if (config.enabled === 'ON_DEMAND') {
+                // Add toggle button
+                this._addNearbyParcelsToggle();
+            }
+        },
+
+        /**
+         * Set up map move handler to reload nearby parcels on pan/zoom.
+         * Uses debouncing to avoid excessive API calls.
+         */
+        _setupNearbyParcelsReload: function() {
+            var self = this;
+            var reloadTimeout = null;
+
+            this.map.on('moveend', function() {
+                // Only reload if visible
+                if (!self.state.nearbyParcelsVisible) {
+                    return;
+                }
+
+                // Debounce - wait 500ms after last move
+                clearTimeout(reloadTimeout);
+                reloadTimeout = setTimeout(function() {
+                    self._loadNearbyParcels();
+                }, 500);
+            });
+        },
+
+        /**
+         * Add toggle button for nearby parcels (ON_DEMAND mode).
+         */
+        _addNearbyParcelsToggle: function() {
+            var self = this;
+
+            var control = document.createElement('div');
+            control.className = 'gis-nearby-parcels-control';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'gis-nearby-parcels-btn';
+            btn.innerHTML = '<span>Show Nearby</span>';
+            btn.setAttribute('aria-label', 'Show or hide nearby registered parcels');
+            btn.setAttribute('aria-pressed', 'false');
+
+            // Count badge (initially hidden)
+            var badge = document.createElement('span');
+            badge.className = 'gis-nearby-parcels-badge';
+            badge.style.display = 'none';
+
+            btn.onclick = function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                var isActive = btn.classList.toggle('active');
+                btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+
+                if (isActive) {
+                    btn.querySelector('span').textContent = 'Hide Nearby';
+                    self.state.nearbyParcelsVisible = true;
+                    self._loadNearbyParcels();
+                } else {
+                    btn.querySelector('span').textContent = 'Show Nearby';
+                    self.state.nearbyParcelsVisible = false;
+                    self._clearNearbyParcels();
+                }
+            };
+
+            control.appendChild(btn);
+            control.appendChild(badge);
+            this.mapContainer.appendChild(control);
+
+            this.nearbyParcelsToggle = btn;
+            this.nearbyParcelsBadge = badge;
+        },
+
+        /**
+         * Load nearby parcels from server.
+         */
+        _loadNearbyParcels: function() {
+            var self = this;
+            var config = this.options.nearbyParcels;
+
+            // Skip if not enabled or already loading
+            if (!this._isNearbyParcelsEnabled()) {
+                return;
+            }
+
+            if (this.state.nearbyParcelsLoading) {
+                return;
+            }
+
+            // For ON_LOAD mode, mark as visible
+            if (config.enabled === 'ON_LOAD') {
+                this.state.nearbyParcelsVisible = true;
+            }
+
+            // Get current map bounds
+            var bounds = this.map.getBounds();
+            var boundsStr = [
+                bounds.getWest().toFixed(6),
+                bounds.getSouth().toFixed(6),
+                bounds.getEast().toFixed(6),
+                bounds.getNorth().toFixed(6)
+            ].join(',');
+
+            // Build API URL
+            var apiUrl = this.options.apiBase + '/nearbyParcels?' +
+                'formId=' + encodeURIComponent(config.formId || '') +
+                '&geometryFieldId=' + encodeURIComponent(config.geometryFieldId || 'c_geometry') +
+                '&bounds=' + encodeURIComponent(boundsStr) +
+                '&maxResults=' + (config.maxResults || 100);
+
+            // Exclude current record if editing
+            if (this.options.recordId) {
+                apiUrl += '&excludeRecordId=' + encodeURIComponent(this.options.recordId);
+            }
+
+            // Add filter condition
+            if (config.filterCondition) {
+                apiUrl += '&filterCondition=' + encodeURIComponent(config.filterCondition);
+            }
+
+            // Add return fields
+            var displayFields = config.displayFields;
+            if (displayFields) {
+                var fieldsStr = typeof displayFields === 'string' ? displayFields : displayFields.join(',');
+                if (fieldsStr) {
+                    apiUrl += '&returnFields=' + encodeURIComponent(fieldsStr);
+                }
+            }
+
+            // Build headers
+            var headers = {
+                'Content-Type': 'application/json'
+            };
+            if (this.options.apiId && this.options.apiKey) {
+                headers['api_id'] = this.options.apiId;
+                headers['api_key'] = this.options.apiKey;
+            }
+
+            this.state.nearbyParcelsLoading = true;
+            this._showNearbyParcelsLoading();
+
+            fetch(apiUrl, {
+                method: 'GET',
+                headers: headers
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.json();
+            })
+            .then(function(response) {
+                self.state.nearbyParcelsLoading = false;
+                self._hideNearbyParcelsLoading();
+
+                // Parse Joget API response wrapper
+                var data = response;
+                if (response.message && typeof response.message === 'string') {
+                    try {
+                        data = JSON.parse(response.message);
+                    } catch (e) {
+                        // Fall back to original
+                    }
+                }
+
+                var parcelsData = data.data || data;
+                self.state.nearbyParcelsData = parcelsData.parcels || [];
+                self.state.nearbyParcelsLoaded = true;
+
+                self._displayNearbyParcels(self.state.nearbyParcelsData);
+
+                // Update count badge
+                var truncated = parcelsData.truncated || false;
+                self._updateNearbyParcelsCount(self.state.nearbyParcelsData.length, truncated);
+            })
+            .catch(function(error) {
+                self.state.nearbyParcelsLoading = false;
+                self._hideNearbyParcelsLoading();
+                console.warn('[GISCapture] Failed to load nearby parcels:', error);
+            });
+        },
+
+        /**
+         * Display nearby parcels on the map.
+         *
+         * CRITICAL SECURITY: All polygons are displayed as READ-ONLY.
+         * - No drag handlers
+         * - No edit controls
+         * - No modification events
+         * - Click only shows info popup (no editing)
+         */
+        _displayNearbyParcels: function(parcels) {
+            var self = this;
+            var config = this.options.nearbyParcels;
+            var style = config.style || {};
+
+            // Clear previous parcels
+            if (this.nearbyParcelsLayer) {
+                this.nearbyParcelsLayer.clearLayers();
+            }
+
+            if (!parcels || parcels.length === 0) {
+                return;
+            }
+
+            parcels.forEach(function(parcel) {
+                try {
+                    var geojson = parcel.geometry;
+                    if (typeof geojson === 'string') {
+                        geojson = JSON.parse(geojson);
+                    }
+
+                    // Get coordinates
+                    var coordinates = geojson.coordinates;
+                    if (geojson.type === 'Feature') {
+                        coordinates = geojson.geometry.coordinates;
+                    }
+
+                    if (!coordinates || !coordinates[0]) {
+                        return;
+                    }
+
+                    // Convert [lng, lat] to [lat, lng] for Leaflet
+                    var latlngs = coordinates[0].map(function(c) {
+                        return [c[1], c[0]];
+                    });
+
+                    // Create polygon with READ-ONLY styling
+                    var polygon = L.polygon(latlngs, {
+                        fillColor: style.fillColor || '#808080',
+                        fillOpacity: style.fillOpacity || 0.15,
+                        color: style.strokeColor || '#666666',
+                        weight: style.strokeWidth || 1,
+                        dashArray: style.strokeDashArray || '3, 3',
+                        // CRITICAL: Disable editing capability
+                        interactive: true,      // Allow click for popup
+                        bubblingMouseEvents: false
+                    });
+
+                    // Build popup content (READ-ONLY info display)
+                    var popupContent = self._buildNearbyParcelPopup(parcel);
+                    polygon.bindPopup(popupContent, {
+                        closeButton: true,
+                        autoClose: true,
+                        maxWidth: 300
+                    });
+
+                    // Hover effect (visual feedback only)
+                    polygon.on('mouseover', function() {
+                        this.setStyle({
+                            fillOpacity: (style.fillOpacity || 0.15) + 0.1,
+                            weight: (style.strokeWidth || 1) + 1
+                        });
+                    });
+
+                    polygon.on('mouseout', function() {
+                        this.setStyle({
+                            fillOpacity: style.fillOpacity || 0.15,
+                            weight: style.strokeWidth || 1
+                        });
+                    });
+
+                    // Add to layer
+                    self.nearbyParcelsLayer.addLayer(polygon);
+
+                } catch (e) {
+                    console.warn('[GISCapture] Invalid nearby parcel geometry:', e);
+                }
+            });
+
+            // Ensure drawing layer stays on top
+            if (this.drawingLayer) {
+                this.drawingLayer.bringToFront();
+            }
+        },
+
+        /**
+         * Build popup content for nearby parcel.
+         * Shows READ-ONLY information - no edit links or buttons.
+         */
+        _buildNearbyParcelPopup: function(parcel) {
+            var self = this;
+            var html = '<div class="gis-nearby-parcel-popup">';
+            html += '<div class="gis-nearby-parcel-header">';
+            html += '<span class="gis-nearby-parcel-icon">&#x1F4CD;</span>';
+            html += '<span class="gis-nearby-parcel-title">Registered Parcel</span>';
+            html += '</div>';
+
+            // Display area
+            if (parcel.areaHectares !== undefined) {
+                html += '<div class="gis-nearby-parcel-info">';
+                html += '<span class="gis-info-label">Area:</span> ';
+                html += '<span class="gis-info-value">' + parcel.areaHectares.toFixed(2) + ' ha</span>';
+                html += '</div>';
+            }
+
+            // Display configured fields
+            if (parcel.recordData) {
+                Object.keys(parcel.recordData).forEach(function(key) {
+                    var value = parcel.recordData[key];
+                    if (value) {
+                        // Format field name (convert snake_case to Title Case)
+                        var label = key.replace(/_/g, ' ').replace(/\b\w/g, function(c) {
+                            return c.toUpperCase();
+                        });
+                        html += '<div class="gis-nearby-parcel-info">';
+                        html += '<span class="gis-info-label">' + self._escapeHtml(label) + ':</span> ';
+                        html += '<span class="gis-info-value">' + self._escapeHtml(value) + '</span>';
+                        html += '</div>';
+                    }
+                });
+            }
+
+            // Footer note - no edit capability
+            html += '<div class="gis-nearby-parcel-footer">';
+            html += '<small>This parcel is already registered</small>';
+            html += '</div>';
+
+            html += '</div>';
+            return html;
+        },
+
+        /**
+         * Escape HTML to prevent XSS
+         */
+        _escapeHtml: function(text) {
+            if (!text) return '';
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        },
+
+        /**
+         * Add map legend showing parcel types.
+         */
+        _addNearbyParcelsLegend: function() {
+            var legend = document.createElement('div');
+            legend.className = 'gis-legend';
+
+            legend.innerHTML =
+                '<div class="gis-legend-title">Legend</div>' +
+                '<div class="gis-legend-item">' +
+                    '<div class="gis-legend-swatch nearby"></div>' +
+                    '<span class="gis-legend-label">Registered parcels</span>' +
+                '</div>' +
+                '<div class="gis-legend-item">' +
+                    '<div class="gis-legend-swatch current"></div>' +
+                    '<span class="gis-legend-label">Current parcel</span>' +
+                '</div>' +
+                '<div class="gis-legend-item">' +
+                    '<div class="gis-legend-swatch overlap"></div>' +
+                    '<span class="gis-legend-label">Overlap area</span>' +
+                '</div>';
+
+            this.mapContainer.appendChild(legend);
+            this.nearbyParcelsLegend = legend;
+        },
+
+        /**
+         * Show loading indicator for nearby parcels.
+         */
+        _showNearbyParcelsLoading: function() {
+            if (this.nearbyParcelsToggle) {
+                this.nearbyParcelsToggle.classList.add('loading');
+            }
+        },
+
+        /**
+         * Hide loading indicator.
+         */
+        _hideNearbyParcelsLoading: function() {
+            if (this.nearbyParcelsToggle) {
+                this.nearbyParcelsToggle.classList.remove('loading');
+            }
+        },
+
+        /**
+         * Update count badge.
+         */
+        _updateNearbyParcelsCount: function(count, truncated) {
+            if (this.nearbyParcelsBadge) {
+                if (count > 0) {
+                    this.nearbyParcelsBadge.textContent = truncated ? count + '+' : count;
+                    this.nearbyParcelsBadge.style.display = 'inline-block';
+                    if (truncated) {
+                        this.nearbyParcelsBadge.classList.add('warning');
+                    } else {
+                        this.nearbyParcelsBadge.classList.remove('warning');
+                    }
+                } else {
+                    this.nearbyParcelsBadge.style.display = 'none';
+                }
+            }
+        },
+
+        /**
+         * Clear nearby parcels from map.
+         */
+        _clearNearbyParcels: function() {
+            if (this.nearbyParcelsLayer) {
+                this.nearbyParcelsLayer.clearLayers();
+            }
+            this.state.nearbyParcelsData = [];
+            this._updateNearbyParcelsCount(0, false);
+        },
+
+        // =============================================
+        // END NEARBY PARCELS METHODS
+        // =============================================
+
         /**
          * Save to hidden field
          */
@@ -3001,6 +3469,11 @@ var GISCapture = (function() {
             this._clearIntersectionHighlights();
             // Clear overlap display
             this._clearOverlapDisplay();
+            // Clear nearby parcels display
+            this._clearNearbyParcels();
+            if (this.nearbyParcelsLayer) {
+                this.map.removeLayer(this.nearbyParcelsLayer);
+            }
             if (this.map) {
                 this.map.remove();
             }

@@ -237,6 +237,79 @@
         ]
     },
     {
+        "title": "Nearby Parcels Display",
+        "properties": [
+            {
+                "name": "showNearbyParcels",
+                "label": "Show Nearby Parcels",
+                "description": "Display existing registered parcels as read-only context for fraud prevention",
+                "type": "selectbox",
+                "options": [
+                    {"value": "DISABLED", "label": "Disabled"},
+                    {"value": "ON_LOAD", "label": "Load on map initialization"},
+                    {"value": "ON_DEMAND", "label": "Load on user request (button)"}
+                ],
+                "value": "DISABLED"
+            },
+            {
+                "name": "nearbyParcelsFormId",
+                "label": "Parcels Form ID",
+                "description": "Form containing parcel records to display",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "nearbyParcelsGeometryField",
+                "label": "Parcels Geometry Field ID",
+                "description": "Field containing GeoJSON geometry",
+                "type": "textfield",
+                "value": "c_geometry"
+            },
+            {
+                "name": "nearbyParcelsDisplayFields",
+                "label": "Display Fields",
+                "description": "Comma-separated field IDs to show in popup (e.g., parcel_name,farmer_name)",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "nearbyParcelsFilterCondition",
+                "label": "Filter Condition",
+                "description": "SQL WHERE clause to filter displayed parcels (e.g., status = 'ACTIVE')",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "nearbyParcelsFillColor",
+                "label": "Fill Color",
+                "description": "Fill color for existing parcels (CSS color)",
+                "type": "textfield",
+                "value": "#808080"
+            },
+            {
+                "name": "nearbyParcelsFillOpacity",
+                "label": "Fill Opacity",
+                "description": "Fill opacity for existing parcels (0-1)",
+                "type": "textfield",
+                "value": "0.15"
+            },
+            {
+                "name": "nearbyParcelsStrokeColor",
+                "label": "Stroke Color",
+                "description": "Border color for existing parcels",
+                "type": "textfield",
+                "value": "#666666"
+            },
+            {
+                "name": "nearbyParcelsMaxResults",
+                "label": "Maximum Parcels",
+                "description": "Maximum number of nearby parcels to display",
+                "type": "textfield",
+                "value": "100"
+            }
+        ]
+    },
+    {
         "title": "GPS Settings (Walk Mode)",
         "properties": [
             {

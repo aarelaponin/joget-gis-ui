@@ -125,6 +125,17 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
         String overlapDisplayFields = getPropertyString("overlapDisplayFields");
         String overlapFilterCondition = getPropertyString("overlapFilterCondition");
 
+        // Nearby Parcels Display
+        String showNearbyParcels = getPropertyString("showNearbyParcels");
+        String nearbyParcelsFormId = getPropertyString("nearbyParcelsFormId");
+        String nearbyParcelsGeometryField = getPropertyString("nearbyParcelsGeometryField");
+        String nearbyParcelsDisplayFields = getPropertyString("nearbyParcelsDisplayFields");
+        String nearbyParcelsFilterCondition = getPropertyString("nearbyParcelsFilterCondition");
+        String nearbyParcelsFillColor = getPropertyString("nearbyParcelsFillColor");
+        String nearbyParcelsFillOpacity = getPropertyString("nearbyParcelsFillOpacity");
+        String nearbyParcelsStrokeColor = getPropertyString("nearbyParcelsStrokeColor");
+        String nearbyParcelsMaxResults = getPropertyString("nearbyParcelsMaxResults");
+
         // GPS Settings (Walk Mode)
         String gpsHighAccuracy = getPropertyString("gpsHighAccuracy");
         String gpsMinAccuracy = getPropertyString("gpsMinAccuracy");
@@ -224,6 +235,32 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
                 overlap.put("displayFields", overlapDisplayFields != null ? overlapDisplayFields : "");
                 overlap.put("filterCondition", overlapFilterCondition != null ? overlapFilterCondition : "");
                 config.put("overlap", overlap);
+            }
+
+            // Nearby Parcels Display config
+            if (showNearbyParcels != null && !"DISABLED".equals(showNearbyParcels) && !showNearbyParcels.isEmpty()) {
+                JSONObject nearbyParcels = new JSONObject();
+                nearbyParcels.put("enabled", showNearbyParcels);
+                nearbyParcels.put("formId", nearbyParcelsFormId != null ? nearbyParcelsFormId : "");
+                nearbyParcels.put("geometryFieldId", nearbyParcelsGeometryField != null ? nearbyParcelsGeometryField : "c_geometry");
+                nearbyParcels.put("displayFields", nearbyParcelsDisplayFields != null ? nearbyParcelsDisplayFields : "");
+                nearbyParcels.put("filterCondition", nearbyParcelsFilterCondition != null ? nearbyParcelsFilterCondition : "");
+                nearbyParcels.put("maxResults", nearbyParcelsMaxResults != null && !nearbyParcelsMaxResults.isEmpty()
+                    ? Integer.parseInt(nearbyParcelsMaxResults) : 100);
+
+                // Style configuration
+                JSONObject nearbyStyle = new JSONObject();
+                nearbyStyle.put("fillColor", nearbyParcelsFillColor != null && !nearbyParcelsFillColor.isEmpty()
+                    ? nearbyParcelsFillColor : "#808080");
+                nearbyStyle.put("fillOpacity", nearbyParcelsFillOpacity != null && !nearbyParcelsFillOpacity.isEmpty()
+                    ? Double.parseDouble(nearbyParcelsFillOpacity) : 0.15);
+                nearbyStyle.put("strokeColor", nearbyParcelsStrokeColor != null && !nearbyParcelsStrokeColor.isEmpty()
+                    ? nearbyParcelsStrokeColor : "#666666");
+                nearbyStyle.put("strokeWidth", 1);
+                nearbyStyle.put("strokeDashArray", "3, 3");
+                nearbyParcels.put("style", nearbyStyle);
+
+                config.put("nearbyParcels", nearbyParcels);
             }
 
             // Output field mapping
