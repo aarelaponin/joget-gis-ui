@@ -1063,14 +1063,52 @@
 /* ============================================
    Location Search
    ============================================ */
+
+/* Search toggle button */
+.gis-search-toggle {
+    position: absolute;
+    top: 80px;
+    left: 10px;
+    z-index: 1000;
+    width: 34px;
+    height: 34px;
+    background: white;
+    border: 2px solid rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    transition: all 0.2s ease;
+}
+
+.gis-search-toggle:hover {
+    background: #f4f4f4;
+    border-color: rgba(0, 0, 0, 0.3);
+}
+
+.gis-search-toggle:focus {
+    outline: 2px solid rgba(51, 136, 255, 0.6);
+    outline-offset: 2px;
+}
+
+.gis-search-toggle.active {
+    background: #3388ff;
+    border-color: #3388ff;
+    color: white;
+}
+
+/* Search container */
 .gis-search-container {
     position: absolute;
-    top: 10px;
-    left: 10px;
+    top: 80px;
+    left: 50px;
     z-index: 1000;
     display: flex;
     align-items: stretch;
-    max-width: 300px;
+    max-width: 280px;
 }
 
 .gis-search-input {
@@ -1247,8 +1285,15 @@
         font-size: 16px;
     }
 
+    .gis-search-toggle {
+        width: 30px;
+        height: 30px;
+        font-size: 14px;
+    }
+
     .gis-search-container {
-        max-width: calc(100% - 20px);
+        left: 46px;
+        max-width: calc(100% - 60px);
     }
 
     .gis-search-input {

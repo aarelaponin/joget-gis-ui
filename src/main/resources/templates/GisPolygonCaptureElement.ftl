@@ -15,7 +15,7 @@
 </div>
 
 <#-- Cache bust version -->
-<#assign gisCacheVersion = "20250106_v11">
+<#assign gisCacheVersion = "20260106_v13">
 
 <#-- Load Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 

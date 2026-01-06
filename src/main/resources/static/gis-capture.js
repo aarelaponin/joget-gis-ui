@@ -406,10 +406,35 @@ var GISCapture = (function() {
         _createLocationSearch: function() {
             var self = this;
 
+            // Create toggle button for search
+            var searchToggle = document.createElement('button');
+            searchToggle.type = 'button';
+            searchToggle.className = 'gis-search-toggle';
+            searchToggle.innerHTML = '&#128269;'; // magnifying glass
+            searchToggle.setAttribute('aria-label', 'Toggle location search');
+            searchToggle.setAttribute('aria-expanded', 'false');
+            searchToggle.title = 'Search location';
+            this.mapContainer.appendChild(searchToggle);
+
             var searchContainer = document.createElement('div');
             searchContainer.className = 'gis-search-container';
+            searchContainer.style.display = 'none'; // Hidden by default
             searchContainer.setAttribute('role', 'search');
             searchContainer.setAttribute('aria-label', 'Location search');
+            this.searchContainer = searchContainer;
+
+            // Toggle button click handler
+            searchToggle.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var isVisible = searchContainer.style.display !== 'none';
+                searchContainer.style.display = isVisible ? 'none' : 'flex';
+                searchToggle.classList.toggle('active', !isVisible);
+                searchToggle.setAttribute('aria-expanded', !isVisible);
+                if (!isVisible) {
+                    self.searchInput.focus();
+                }
+            });
 
             // Search input
             this.searchInput = document.createElement('input');
