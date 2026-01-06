@@ -1,0 +1,108 @@
+{
+  "elements": [
+    {
+      "elements": [
+        {
+          "elements": [
+            {
+              "className": "global.govstack.gisui.element.GisPolygonCaptureElement",
+              "properties": {
+                "allowSelfIntersection": "",
+                "strokeWidth": "3",
+                "defaultZoom": "14",
+                "fillOpacity": "0.2",
+                "apiKey": "%%%%****SECURE_VALUE****-0%%%%",
+                "overlapDisplayFields": "areaId",
+                "defaultLatitude": "-29.5",
+                "defaultLongitude": "28.5",
+                "overlapFilterCondition": "",
+                "required": "",
+                "fillColor": "#3388ff",
+                "gpsHighAccuracy": "true",
+                "autoCloseDistance": "15",
+                "minVertices": "3",
+                "enableOverlapCheck": "true",
+                "minAreaHectares": "1",
+                "gpsMinAccuracy": "10",
+                "id": "geometry",
+                "maxAreaHectares": "1000",
+                "strokeColor": "#3388ff",
+                "apiId": "API-dd317f63-9eb8-4816-9775-8a32c299679d",
+                "maxVertices": "100",
+                "showSatelliteOption": "true",
+                "perimeterFieldId": "",
+                "centroidFieldId": "",
+                "label": "",
+                "overlapGeometryField": "geometry",
+                "mapHeight": "600",
+                "vertexCountFieldId": "",
+                "apiEndpoint": "/jw/api/gis/gis",
+                "defaultMode": "AUTO",
+                "overlapFormId": "gisData",
+                "areaFieldId": "",
+                "tileProvider": "OSM",
+                "captureMode": "BOTH",
+                "requiredMessage": "Please capture a polygon boundary"
+              }
+            },
+            {
+              "className": "org.joget.apps.form.lib.IdGeneratorField",
+              "properties": {
+                "hidden": "",
+                "format": "ID-??????",
+                "workflowVariable": "",
+                "envVariable": "counter",
+                "isDistributedGeneration": "",
+                "label": "Area ID",
+                "id": "areaId"
+              }
+            }
+          ],
+          "className": "org.joget.apps.form.model.Column",
+          "properties": {
+            "width": "100%"
+          }
+        }
+      ],
+      "className": "org.joget.apps.form.model.Section",
+      "properties": {
+        "visibilityControl": "",
+        "permissionReadonly": "",
+        "permission": {
+          "className": "",
+          "properties": {}
+        },
+        "label": "",
+        "reverse": "",
+        "storeBinder": {
+          "className": "",
+          "properties": {}
+        },
+        "visibilityValue": "",
+        "regex": "",
+        "readonly": "",
+        "loadBinder": {
+          "className": "",
+          "properties": {}
+        },
+        "comment": "",
+        "id": "section1",
+        "join": "",
+        "readonlyLabel": ""
+      }
+    }
+  ],
+  "className": "org.joget.apps.form.model.Form",
+  "properties": {
+    "loadBinder": {
+      "className": "org.joget.apps.form.lib.WorkflowFormBinder"
+    },
+    "name": "GIS Data Form",
+    "description": "",
+    "id": "gisData",
+    "storeBinder": {
+      "className": "org.joget.apps.form.lib.WorkflowFormBinder"
+    },
+    "tableName": "gisData"
+  }
+}

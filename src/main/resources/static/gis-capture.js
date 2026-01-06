@@ -1,0 +1,3016 @@
+/**
+ * GIS Polygon Capture Component
+ * 
+ * A Leaflet.js-based component for capturing polygon boundaries
+ * with Walk Mode (GPS) and Draw Mode (desktop) support.
+ * 
+ * @version 1.0
+ */
+var GISCapture = (function() {
+    'use strict';
+
+    // Tile layer configurations
+    var TILE_PROVIDERS = {
+        OSM: {
+            url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+            maxZoom: 19
+        },
+        SATELLITE_ESRI: {
+            url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            attribution: '&copy; <a href="https://www.esri.com">Esri</a>',
+            maxZoom: 19
+        },
+        HYBRID: {
+            url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            attribution: '&copy; <a href="https://www.esri.com">Esri</a>',
+            maxZoom: 19,
+            labels: true
+        },
+        TERRAIN: {
+            url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://opentopomap.org">OpenTopoMap</a>',
+            maxZoom: 17
+        }
+    };
+
+    /**
+     * Initialize GIS Capture component
+     * 
+     * @param {string} containerId - DOM element ID for the container
+     * @param {Object} options - Configuration options
+     */
+    function init(containerId, options) {
+        var container = document.getElementById(containerId);
+        if (!container) {
+            console.error('[GISCapture] Container not found: ' + containerId);
+            return null;
+        }
+
+        var instance = new GISCaptureInstance(container, options);
+        return instance;
+    }
+
+    /**
+     * GIS Capture Instance
+     */
+    function GISCaptureInstance(container, options) {
+        this.container = container;
+        this.options = Object.assign({
+            apiBase: '/jw/api/gis/gis',
+            apiId: '',
+            apiKey: '',
+            hiddenFieldId: '',
+            recordId: '',  // Current record ID for edit mode (excluded from overlap check)
+            outputFields: {},
+            captureMode: 'BOTH',
+            defaultMode: 'AUTO',
+            defaultLatitude: -29.5,
+            defaultLongitude: 28.5,
+            defaultZoom: 10,
+            tileProvider: 'OSM',
+            showSatelliteOption: true,
+            mapHeight: 400,
+            validation: {
+                minAreaHectares: 0.01,
+                maxAreaHectares: 1000,
+                minVertices: 3,
+                maxVertices: 100,
+                allowSelfIntersection: false
+            },
+            gps: {
+                highAccuracy: true,
+                minAccuracy: 10,
+                autoCloseDistance: 15
+            },
+            style: {
+                fillColor: '#3388ff',
+                fillOpacity: 0.2,
+                strokeColor: '#3388ff',
+                strokeWidth: 3
+            },
+            overlap: null,
+            onGeometryChange: null,
+            onValidationError: null,
+            onError: null
+        }, options);
+
+        // State
+        this.state = {
+            mode: null,         // 'DRAW' or 'WALK'
+            phase: 'SELECT',    // 'SELECT', 'DRAWING', 'PREVIEW', 'SAVED'
+            vertices: [],
+            polygon: null,
+            metrics: null,
+            gpsWatchId: null,
+            currentPosition: null,
+            gpsAccuracy: null,
+            gpsAccuracyValues: [],       // Track accuracy for each vertex in Walk Mode
+            selectedVertexIndex: null,  // For vertex deletion
+            intersectionPoints: [],      // Self-intersection points
+            intersectingEdges: [],       // Edges that self-intersect
+            // Overlap checking state
+            overlaps: [],                // Array of overlapping records
+            overlapChecked: false,       // Whether overlap check has been performed
+            overlapConfirmed: false,     // Whether user confirmed saving with overlaps
+            overlapCheckPending: false   // Whether overlap check is in progress
+        };
+
+        // Map references
+        this.map = null;
+        this.tileLayer = null;
+        this.drawingLayer = null;
+        this.vertexMarkers = [];
+        this.midpointMarkers = [];
+        this.intersectionMarkers = [];
+        this.intersectingEdgeLines = [];
+        this.positionMarker = null;
+        this.ghostLine = null;
+        this.closeHintTooltip = null;
+        this.warningPanel = null;
+        // Overlap display references
+        this.overlapLayer = null;          // Layer group for existing polygons
+        this.overlapHighlightLayer = null; // Layer for overlap intersection areas
+        this.overlapPanel = null;          // Overlap warning panel element
+
+        // Accessibility
+        this.liveRegion = null;        // ARIA live region for announcements
+        this.searchInput = null;       // Location search input
+        this.searchResults = null;     // Search results dropdown
+
+        // Initialize
+        this._init();
+    }
+
+    // Prototype methods
+    GISCaptureInstance.prototype = {
+
+        /**
+         * Initialize the component
+         */
+        _init: function() {
+            var self = this;
+
+            // Build HTML structure
+            this._buildUI();
+
+            // Load existing value if any
+            this._loadExistingValue();
+
+            // If value exists, go to preview state
+            if (this.state.vertices.length > 0) {
+                this.state.phase = 'PREVIEW';
+                this._renderPreviewState();
+            } else {
+                // Show empty state first
+                this._showEmptyState();
+            }
+        },
+
+        /**
+         * Build UI structure
+         */
+        _buildUI: function() {
+            this.container.innerHTML = '';
+            this.container.classList.add('gis-container');
+
+            // Create wrapper
+            this.wrapper = document.createElement('div');
+            this.wrapper.className = 'gis-map-wrapper';
+            this.wrapper.style.height = this.options.mapHeight + 'px';
+            this.container.appendChild(this.wrapper);
+
+            // Create map container
+            this.mapContainer = document.createElement('div');
+            this.mapContainer.className = 'gis-map';
+            this.mapContainer.style.height = '100%';
+            this.wrapper.appendChild(this.mapContainer);
+
+            // Create info panel
+            this.infoPanel = document.createElement('div');
+            this.infoPanel.className = 'gis-info-panel';
+            this.infoPanel.style.display = 'none';
+            this.container.appendChild(this.infoPanel);
+
+            // Create validation panel
+            this.validationPanel = document.createElement('div');
+            this.validationPanel.className = 'gis-validation-panel';
+            this.validationPanel.style.display = 'none';
+            this.container.appendChild(this.validationPanel);
+
+            // Create warning panel (for real-time warnings during drawing)
+            this.warningPanel = document.createElement('div');
+            this.warningPanel.className = 'gis-warning-panel';
+            this.warningPanel.style.display = 'none';
+            this.container.appendChild(this.warningPanel);
+
+            // Create overlap panel (for overlap warnings)
+            this.overlapPanel = document.createElement('div');
+            this.overlapPanel.className = 'gis-overlap-panel';
+            this.overlapPanel.style.display = 'none';
+            this.container.appendChild(this.overlapPanel);
+
+            // Initialize map
+            this._initMap();
+
+            // Initialize accessibility features
+            this._initAccessibility();
+        },
+
+        /**
+         * Initialize Leaflet map
+         */
+        _initMap: function() {
+            var self = this;
+
+            // Create map
+            this.map = L.map(this.mapContainer, {
+                center: [this.options.defaultLatitude, this.options.defaultLongitude],
+                zoom: this.options.defaultZoom,
+                zoomControl: true
+            });
+
+            // Add tile layer
+            this._setTileLayer(this.options.tileProvider);
+
+            // Create drawing layer
+            this.drawingLayer = L.layerGroup().addTo(this.map);
+
+            // Create overlap layers (below drawing layer)
+            this.overlapLayer = L.layerGroup().addTo(this.map);
+            this.overlapHighlightLayer = L.layerGroup().addTo(this.map);
+
+            // Add layer control if enabled
+            if (this.options.showSatelliteOption) {
+                this._addLayerControl();
+            }
+
+            // Map click handler for Draw Mode
+            this.map.on('click', function(e) {
+                if (self.state.mode === 'DRAW' && self.state.phase === 'DRAWING') {
+                    self._addVertex(e.latlng.lat, e.latlng.lng);
+                }
+            });
+        },
+
+        /**
+         * Set tile layer
+         */
+        _setTileLayer: function(provider) {
+            if (this.tileLayer) {
+                this.map.removeLayer(this.tileLayer);
+            }
+
+            var config = TILE_PROVIDERS[provider] || TILE_PROVIDERS.OSM;
+            this.tileLayer = L.tileLayer(config.url, {
+                attribution: config.attribution,
+                maxZoom: config.maxZoom
+            }).addTo(this.map);
+        },
+
+        /**
+         * Add layer control
+         */
+        _addLayerControl: function() {
+            var self = this;
+
+            var control = document.createElement('div');
+            control.className = 'gis-layer-control';
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'gis-layer-btn';
+            btn.innerHTML = '🗺️ Layers';
+            btn.setAttribute('aria-label', 'Change map layer');
+            btn.setAttribute('aria-haspopup', 'true');
+            btn.setAttribute('aria-expanded', 'false');
+
+            var dropdown = document.createElement('div');
+            dropdown.className = 'gis-layer-dropdown';
+
+            Object.keys(TILE_PROVIDERS).forEach(function(key) {
+                var option = document.createElement('div');
+                option.className = 'gis-layer-option';
+                if (key === self.options.tileProvider) {
+                    option.classList.add('selected');
+                }
+                option.textContent = key.replace('_', ' ');
+                option.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    self._setTileLayer(key);
+                    dropdown.querySelectorAll('.gis-layer-option').forEach(function(opt) {
+                        opt.classList.remove('selected');
+                    });
+                    option.classList.add('selected');
+                    dropdown.classList.remove('open');
+                };
+                dropdown.appendChild(option);
+            });
+
+            btn.onclick = function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var isOpen = dropdown.classList.toggle('open');
+                btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            };
+
+            document.addEventListener('click', function() {
+                dropdown.classList.remove('open');
+                btn.setAttribute('aria-expanded', 'false');
+            });
+
+            control.appendChild(btn);
+            control.appendChild(dropdown);
+            this.mapContainer.appendChild(control);
+        },
+
+        // =============================================
+        // ACCESSIBILITY METHODS
+        // =============================================
+
+        /**
+         * Initialize accessibility features
+         */
+        _initAccessibility: function() {
+            var self = this;
+
+            // Create ARIA live region for screen reader announcements
+            this._createLiveRegion();
+
+            // Create location search control
+            this._createLocationSearch();
+
+            // Set up keyboard navigation for the map container
+            this._setupKeyboardNavigation();
+
+            // Add ARIA attributes to container
+            this.container.setAttribute('role', 'application');
+            this.container.setAttribute('aria-label', 'GIS polygon capture tool');
+
+            // Make map container focusable for keyboard navigation
+            this.mapContainer.setAttribute('tabindex', '0');
+            this.mapContainer.setAttribute('role', 'img');
+            this.mapContainer.setAttribute('aria-label', 'Interactive map for capturing polygon boundaries. Use arrow keys to pan, plus and minus to zoom.');
+        },
+
+        /**
+         * Create ARIA live region for screen reader announcements
+         */
+        _createLiveRegion: function() {
+            this.liveRegion = document.createElement('div');
+            this.liveRegion.className = 'gis-live-region';
+            this.liveRegion.setAttribute('role', 'status');
+            this.liveRegion.setAttribute('aria-live', 'polite');
+            this.liveRegion.setAttribute('aria-atomic', 'true');
+            // Visually hidden but accessible to screen readers
+            this.liveRegion.style.cssText = 'position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;';
+            this.container.appendChild(this.liveRegion);
+        },
+
+        /**
+         * Announce message to screen readers
+         */
+        _announce: function(message) {
+            if (!this.liveRegion) return;
+
+            // Clear and set new message (forces re-announcement)
+            this.liveRegion.textContent = '';
+            setTimeout(function() {
+                this.liveRegion.textContent = message;
+            }.bind(this), 50);
+        },
+
+        /**
+         * Create location search control
+         */
+        _createLocationSearch: function() {
+            var self = this;
+
+            var searchContainer = document.createElement('div');
+            searchContainer.className = 'gis-search-container';
+            searchContainer.setAttribute('role', 'search');
+            searchContainer.setAttribute('aria-label', 'Location search');
+
+            // Search input
+            this.searchInput = document.createElement('input');
+            this.searchInput.type = 'text';
+            this.searchInput.className = 'gis-search-input';
+            this.searchInput.placeholder = 'Search location...';
+            this.searchInput.setAttribute('aria-label', 'Search for a location');
+            this.searchInput.setAttribute('aria-autocomplete', 'list');
+            this.searchInput.setAttribute('aria-expanded', 'false');
+            this.searchInput.setAttribute('autocomplete', 'off');
+
+            // Search button
+            var searchBtn = document.createElement('button');
+            searchBtn.type = 'button';
+            searchBtn.className = 'gis-search-btn';
+            searchBtn.innerHTML = '&#128269;'; // magnifying glass
+            searchBtn.setAttribute('aria-label', 'Search');
+
+            // Results dropdown
+            this.searchResults = document.createElement('div');
+            this.searchResults.className = 'gis-search-results';
+            this.searchResults.setAttribute('role', 'listbox');
+            this.searchResults.setAttribute('aria-label', 'Search results');
+            this.searchResults.style.display = 'none';
+
+            // Event handlers
+            var searchTimeout = null;
+
+            this.searchInput.addEventListener('input', function() {
+                clearTimeout(searchTimeout);
+                var query = self.searchInput.value.trim();
+
+                if (query.length < 3) {
+                    self._hideSearchResults();
+                    return;
+                }
+
+                // Debounce search
+                searchTimeout = setTimeout(function() {
+                    self._performSearch(query);
+                }, 300);
+            });
+
+            this.searchInput.addEventListener('keydown', function(e) {
+                self._handleSearchKeydown(e);
+            });
+
+            searchBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var query = self.searchInput.value.trim();
+                if (query.length >= 3) {
+                    self._performSearch(query);
+                }
+            });
+
+            // Close results when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!searchContainer.contains(e.target)) {
+                    self._hideSearchResults();
+                }
+            });
+
+            searchContainer.appendChild(this.searchInput);
+            searchContainer.appendChild(searchBtn);
+            searchContainer.appendChild(this.searchResults);
+            this.mapContainer.appendChild(searchContainer);
+        },
+
+        /**
+         * Perform location search via API
+         */
+        _performSearch: function(query) {
+            var self = this;
+
+            // Build API URL
+            var apiUrl = this.options.apiBase + '/geocode?query=' + encodeURIComponent(query) + '&limit=5';
+
+            // Add headers
+            var headers = {};
+            if (this.options.apiId && this.options.apiKey) {
+                headers['api_id'] = this.options.apiId;
+                headers['api_key'] = this.options.apiKey;
+            }
+
+            // Show loading state
+            this._showSearchLoading();
+
+            fetch(apiUrl, {
+                method: 'GET',
+                headers: headers
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('Search failed');
+                }
+                return response.json();
+            })
+            .then(function(response) {
+                // Parse Joget API response
+                var data = response;
+                if (response.message && typeof response.message === 'string') {
+                    try {
+                        data = JSON.parse(response.message);
+                    } catch (e) {
+                        // Fall back to original response
+                    }
+                }
+
+                var results = data.results || data.data || data || [];
+                self._displaySearchResults(results);
+            })
+            .catch(function(error) {
+                console.warn('[GISCapture] Search error:', error);
+                self._showSearchError();
+            });
+        },
+
+        /**
+         * Show search loading state
+         */
+        _showSearchLoading: function() {
+            this.searchResults.innerHTML = '<div class="gis-search-loading">Searching...</div>';
+            this.searchResults.style.display = 'block';
+            this.searchInput.setAttribute('aria-expanded', 'true');
+        },
+
+        /**
+         * Show search error
+         */
+        _showSearchError: function() {
+            this.searchResults.innerHTML = '<div class="gis-search-error">Search failed. Try again.</div>';
+            this.searchResults.style.display = 'block';
+        },
+
+        /**
+         * Display search results
+         */
+        _displaySearchResults: function(results) {
+            var self = this;
+
+            if (!results || results.length === 0) {
+                this.searchResults.innerHTML = '<div class="gis-search-no-results">No locations found</div>';
+                this.searchResults.style.display = 'block';
+                this._announce('No locations found');
+                return;
+            }
+
+            this.searchResults.innerHTML = '';
+
+            results.forEach(function(result, index) {
+                var item = document.createElement('div');
+                item.className = 'gis-search-result-item';
+                item.setAttribute('role', 'option');
+                item.setAttribute('tabindex', '-1');
+                item.setAttribute('data-index', index);
+                item.setAttribute('data-lat', result.lat || result.latitude);
+                item.setAttribute('data-lng', result.lon || result.lng || result.longitude);
+
+                var name = result.display_name || result.displayName || result.name || 'Unknown location';
+                item.textContent = name;
+
+                item.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    self._selectSearchResult(result);
+                });
+
+                item.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        self._selectSearchResult(result);
+                    }
+                });
+
+                self.searchResults.appendChild(item);
+            });
+
+            this.searchResults.style.display = 'block';
+            this.searchInput.setAttribute('aria-expanded', 'true');
+            this._announce(results.length + ' location' + (results.length > 1 ? 's' : '') + ' found');
+        },
+
+        /**
+         * Select a search result and navigate map
+         */
+        _selectSearchResult: function(result) {
+            var lat = parseFloat(result.lat || result.latitude);
+            var lng = parseFloat(result.lon || result.lng || result.longitude);
+
+            if (isNaN(lat) || isNaN(lng)) {
+                this._showToast('Invalid location coordinates', 'error');
+                return;
+            }
+
+            // Navigate map to location
+            this.map.setView([lat, lng], 16);
+
+            // Clear search
+            this.searchInput.value = '';
+            this._hideSearchResults();
+
+            // Announce navigation
+            var name = result.display_name || result.displayName || result.name || 'Selected location';
+            this._announce('Map moved to ' + name);
+            this._showToast('Navigated to location', 'success');
+        },
+
+        /**
+         * Hide search results
+         */
+        _hideSearchResults: function() {
+            if (this.searchResults) {
+                this.searchResults.style.display = 'none';
+                this.searchResults.innerHTML = '';
+            }
+            if (this.searchInput) {
+                this.searchInput.setAttribute('aria-expanded', 'false');
+            }
+        },
+
+        /**
+         * Handle keyboard navigation in search results
+         */
+        _handleSearchKeydown: function(e) {
+            var items = this.searchResults.querySelectorAll('.gis-search-result-item');
+            if (items.length === 0) return;
+
+            var currentIndex = -1;
+            var focused = this.searchResults.querySelector('.gis-search-result-item:focus');
+            if (focused) {
+                currentIndex = parseInt(focused.getAttribute('data-index'), 10);
+            }
+
+            switch (e.key) {
+                case 'ArrowDown':
+                    e.preventDefault();
+                    if (currentIndex < items.length - 1) {
+                        items[currentIndex + 1].focus();
+                    } else if (currentIndex === -1 && items.length > 0) {
+                        items[0].focus();
+                    }
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    if (currentIndex > 0) {
+                        items[currentIndex - 1].focus();
+                    } else if (currentIndex === 0) {
+                        this.searchInput.focus();
+                    }
+                    break;
+                case 'Escape':
+                    e.preventDefault();
+                    this._hideSearchResults();
+                    this.searchInput.focus();
+                    break;
+                case 'Enter':
+                    if (focused) {
+                        e.preventDefault();
+                        focused.click();
+                    }
+                    break;
+            }
+        },
+
+        /**
+         * Set up keyboard navigation for map and controls
+         */
+        _setupKeyboardNavigation: function() {
+            var self = this;
+
+            // Global keyboard handler for the component
+            this._boundGlobalKeyHandler = function(e) {
+                // Only handle if focus is within our container or on map
+                if (!self.container.contains(document.activeElement) &&
+                    document.activeElement !== self.mapContainer) {
+                    return;
+                }
+
+                self._handleGlobalKeydown(e);
+            };
+
+            document.addEventListener('keydown', this._boundGlobalKeyHandler);
+
+            // Map-specific keyboard handler when map is focused
+            this.mapContainer.addEventListener('keydown', function(e) {
+                self._handleMapKeydown(e);
+            });
+        },
+
+        /**
+         * Handle global keyboard events
+         */
+        _handleGlobalKeydown: function(e) {
+            // Escape key - cancel current action
+            if (e.key === 'Escape') {
+                if (this.state.phase === 'DRAWING') {
+                    // If drawing and has vertices, complete the polygon if possible
+                    if (this.state.vertices.length >= 3) {
+                        this._completePolygon();
+                        this._announce('Drawing completed');
+                    } else {
+                        this._announce('Need at least 3 corners to complete');
+                    }
+                }
+                // Deselect any selected vertex
+                this._deselectVertex();
+                // Hide search results
+                this._hideSearchResults();
+            }
+        },
+
+        /**
+         * Handle map-specific keyboard events (when map container is focused)
+         */
+        _handleMapKeydown: function(e) {
+            var panAmount = 100; // pixels to pan
+            var handled = false;
+
+            switch (e.key) {
+                case 'ArrowUp':
+                    this.map.panBy([0, -panAmount]);
+                    this._announce('Panned map north');
+                    handled = true;
+                    break;
+                case 'ArrowDown':
+                    this.map.panBy([0, panAmount]);
+                    this._announce('Panned map south');
+                    handled = true;
+                    break;
+                case 'ArrowLeft':
+                    this.map.panBy([-panAmount, 0]);
+                    this._announce('Panned map west');
+                    handled = true;
+                    break;
+                case 'ArrowRight':
+                    this.map.panBy([panAmount, 0]);
+                    this._announce('Panned map east');
+                    handled = true;
+                    break;
+                case '+':
+                case '=':
+                    this.map.zoomIn();
+                    this._announce('Zoomed in to level ' + this.map.getZoom());
+                    handled = true;
+                    break;
+                case '-':
+                case '_':
+                    this.map.zoomOut();
+                    this._announce('Zoomed out to level ' + this.map.getZoom());
+                    handled = true;
+                    break;
+                case 'Enter':
+                case ' ':
+                    // Add vertex at map center during drawing mode
+                    if (this.state.phase === 'DRAWING' && this.state.mode === 'DRAW') {
+                        e.preventDefault();
+                        var center = this.map.getCenter();
+                        this._addVertex(center.lat, center.lng);
+                        handled = true;
+                    }
+                    break;
+            }
+
+            if (handled) {
+                e.preventDefault();
+            }
+        },
+
+        // =============================================
+        // END ACCESSIBILITY METHODS
+        // =============================================
+
+        /**
+         * Show empty state UI
+         */
+        _showEmptyState: function() {
+            var self = this;
+            this.state.phase = 'EMPTY';
+
+            // Remove any existing overlays
+            var existingOverlay = this.wrapper.querySelector('.gis-empty-state');
+            if (existingOverlay) existingOverlay.remove();
+
+            // Create empty state overlay
+            var overlay = document.createElement('div');
+            overlay.className = 'gis-empty-state';
+            overlay.innerHTML =
+                '<div class="gis-empty-content">' +
+                    '<div class="gis-empty-icon" aria-hidden="true">&#128506;</div>' +
+                    '<div class="gis-empty-text">No boundary captured yet</div>' +
+                    '<button type="button" class="gis-capture-btn" aria-label="Start capturing polygon boundary">&#128205; Capture Boundary</button>' +
+                '</div>';
+
+            overlay.querySelector('.gis-capture-btn').onclick = function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                overlay.remove();
+                self._determineInitialState();
+            };
+
+            this.wrapper.appendChild(overlay);
+        },
+
+        /**
+         * Determine initial state based on options
+         */
+        _determineInitialState: function() {
+            var captureMode = this.options.captureMode;
+            var defaultMode = this.options.defaultMode;
+
+            if (captureMode === 'VIEW_ONLY') {
+                this.state.mode = null;
+                this.state.phase = 'VIEW';
+                return;
+            }
+
+            if (captureMode === 'WALK') {
+                this._startWalkMode();
+            } else if (captureMode === 'DRAW') {
+                this._startDrawMode();
+            } else if (captureMode === 'BOTH') {
+                if (defaultMode === 'AUTO') {
+                    // Detect device type
+                    var isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                    if (isMobile) {
+                        this._showModeSelection();
+                    } else {
+                        this._startDrawMode();
+                    }
+                } else if (defaultMode === 'WALK') {
+                    this._startWalkMode();
+                } else {
+                    this._startDrawMode();
+                }
+            }
+        },
+
+        /**
+         * Show mode selection UI
+         */
+        _showModeSelection: function() {
+            var self = this;
+            this.state.phase = 'SELECT';
+
+            // Create selection overlay
+            var overlay = document.createElement('div');
+            overlay.className = 'gis-mode-selection';
+            overlay.innerHTML = '<h3>How would you like to capture this boundary?</h3>' +
+                '<div class="gis-mode-buttons">' +
+                    '<div class="gis-mode-btn" data-mode="WALK">' +
+                        '<span class="gis-mode-icon">🚶</span>' +
+                        '<span class="gis-mode-title">Walk the Boundary</span>' +
+                        '<span class="gis-mode-subtitle">Best when at the location</span>' +
+                    '</div>' +
+                    '<div class="gis-mode-btn" data-mode="DRAW">' +
+                        '<span class="gis-mode-icon">🖱️</span>' +
+                        '<span class="gis-mode-title">Draw on Map</span>' +
+                        '<span class="gis-mode-subtitle">Best from office</span>' +
+                    '</div>' +
+                '</div>';
+
+            overlay.querySelectorAll('.gis-mode-btn').forEach(function(btn) {
+                btn.onclick = function() {
+                    var mode = btn.getAttribute('data-mode');
+                    overlay.remove();
+                    if (mode === 'WALK') {
+                        self._startWalkMode();
+                    } else {
+                        self._startDrawMode();
+                    }
+                };
+            });
+
+            this.container.appendChild(overlay);
+        },
+
+        /**
+         * Start Draw Mode
+         */
+        _startDrawMode: function() {
+            var self = this;
+            this.state.mode = 'DRAW';
+            this.state.phase = 'DRAWING';
+            this.state.vertices = [];
+
+            // Add step progress indicator
+            this._addStepProgress(1);
+
+            // Add toolbar
+            this._addDrawToolbar();
+
+            // Update cursor
+            this.mapContainer.style.cursor = 'crosshair';
+
+            // Set up ghost line tracking
+            this._boundMouseMoveHandler = function(e) {
+                self._updateGhostLine(e.latlng);
+                self._checkCloseHint(e.latlng);
+            };
+            this.map.on('mousemove', this._boundMouseMoveHandler);
+
+            // Set up double-click to finish
+            this._boundDblClickHandler = function(e) {
+                L.DomEvent.preventDefault(e);
+                L.DomEvent.stopPropagation(e);
+                if (self.state.vertices.length >= 3) {
+                    self._completePolygon();
+                }
+            };
+            this.map.on('dblclick', this._boundDblClickHandler);
+
+            // Disable map double-click zoom during drawing
+            this.map.doubleClickZoom.disable();
+
+            // Set up keyboard handler for Delete key
+            this._boundKeyDownHandler = function(e) {
+                self._handleKeyDown(e);
+            };
+            document.addEventListener('keydown', this._boundKeyDownHandler);
+
+            this._showToast('Click on the map to add corners', 'info');
+        },
+
+        /**
+         * Handle keyboard events (Delete key for vertex deletion, Ctrl+Z for undo)
+         */
+        _handleKeyDown: function(e) {
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (this.state.selectedVertexIndex !== null &&
+                    (this.state.phase === 'DRAWING' || this.state.phase === 'PREVIEW')) {
+                    e.preventDefault();
+                    this._deleteSelectedVertex();
+                }
+            } else if (e.key === 'Escape') {
+                this._deselectVertex();
+            } else if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                // Ctrl+Z or Cmd+Z for undo
+                if (this.state.phase === 'DRAWING' && this.state.vertices.length > 0) {
+                    e.preventDefault();
+                    this._undoLastVertex();
+                    this._announce('Undo: removed last corner');
+                }
+            }
+        },
+
+        /**
+         * Delete the currently selected vertex
+         */
+        _deleteSelectedVertex: function() {
+            var index = this.state.selectedVertexIndex;
+            if (index === null || this.state.vertices.length <= 3) {
+                if (this.state.vertices.length <= 3) {
+                    this._showToast('Need at least 3 corners', 'warning');
+                }
+                return;
+            }
+
+            // Remove vertex
+            this.state.vertices.splice(index, 1);
+
+            // Deselect
+            this._deselectVertex();
+
+            // Rebuild all markers
+            this._rebuildAllMarkers();
+
+            // Update polygon and metrics
+            this._updatePolygon();
+            this._calculateMetrics();
+            this._updateInfoPanel();
+            this._checkSelfIntersection();
+            this._checkAreaWarnings();
+
+            // Update hidden field
+            this._saveToHiddenField();
+
+            // Re-check overlaps after vertex deletion in preview mode
+            if (this.state.phase === 'PREVIEW') {
+                this._checkOverlaps();
+            }
+
+            this._showToast('Corner removed', 'info');
+        },
+
+        /**
+         * Select a vertex for editing
+         */
+        _selectVertex: function(index) {
+            // Deselect previous
+            this._deselectVertex();
+
+            this.state.selectedVertexIndex = index;
+            var marker = this.vertexMarkers[index];
+            if (marker) {
+                var el = marker.getElement();
+                if (el) {
+                    el.classList.add('selected');
+                }
+            }
+        },
+
+        /**
+         * Deselect current vertex
+         */
+        _deselectVertex: function() {
+            if (this.state.selectedVertexIndex !== null) {
+                var marker = this.vertexMarkers[this.state.selectedVertexIndex];
+                if (marker) {
+                    var el = marker.getElement();
+                    if (el) {
+                        el.classList.remove('selected');
+                    }
+                }
+            }
+            this.state.selectedVertexIndex = null;
+        },
+
+        /**
+         * Add Draw Mode toolbar
+         */
+        _addDrawToolbar: function() {
+            var self = this;
+
+            if (this.toolbar) {
+                this.toolbar.remove();
+            }
+
+            this.toolbar = document.createElement('div');
+            this.toolbar.className = 'gis-toolbar';
+
+            // Undo button
+            var undoBtn = document.createElement('button');
+            undoBtn.type = 'button';
+            undoBtn.className = 'gis-toolbar-btn';
+            undoBtn.innerHTML = '↩️ Undo';
+            undoBtn.setAttribute('aria-label', 'Undo last corner');
+            undoBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); self._undoLastVertex(); };
+            this.toolbar.appendChild(undoBtn);
+
+            // Clear button
+            var clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.className = 'gis-toolbar-btn danger';
+            clearBtn.innerHTML = '🗑️ Clear';
+            clearBtn.setAttribute('aria-label', 'Clear all corners');
+            clearBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); self._clearDrawing(); };
+            this.toolbar.appendChild(clearBtn);
+
+            // Spacer
+            var spacer = document.createElement('div');
+            spacer.className = 'gis-toolbar-spacer';
+            this.toolbar.appendChild(spacer);
+
+            // Complete button
+            var completeBtn = document.createElement('button');
+            completeBtn.type = 'button';
+            completeBtn.className = 'gis-toolbar-btn primary';
+            completeBtn.innerHTML = '✓ Complete';
+            completeBtn.setAttribute('aria-label', 'Complete polygon drawing');
+            completeBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); self._completePolygon(); };
+            this.toolbar.appendChild(completeBtn);
+
+            this.wrapper.insertBefore(this.toolbar, this.mapContainer);
+        },
+
+        /**
+         * Add step progress indicator
+         */
+        _addStepProgress: function(step) {
+            if (this.stepProgress) {
+                this.stepProgress.remove();
+            }
+
+            this.stepProgress = document.createElement('div');
+            this.stepProgress.className = 'gis-step-progress';
+
+            var step1Active = step >= 1;
+            var step2Active = step >= 2;
+            var step1Complete = step > 1;
+
+            this.stepProgress.innerHTML =
+                '<div class="gis-step-header">STEP ' + step + ' of 2: ' +
+                    (step === 1 ? 'Draw the boundary' : 'Preview') + '</div>' +
+                '<div class="gis-step-bar">' +
+                    '<div class="gis-step-fill" style="width: ' + (step === 1 ? '50' : '100') + '%"></div>' +
+                '</div>' +
+                '<div class="gis-step-labels">' +
+                    '<span class="gis-step-label ' + (step1Active ? 'active' : '') + (step1Complete ? ' complete' : '') + '">Draw Boundary</span>' +
+                    '<span class="gis-step-label ' + (step2Active ? 'active' : '') + '">Preview</span>' +
+                '</div>';
+
+            this.container.insertBefore(this.stepProgress, this.wrapper);
+        },
+
+        /**
+         * Update ghost line from last vertex to cursor
+         */
+        _updateGhostLine: function(latlng) {
+            if (this.state.phase !== 'DRAWING' || this.state.vertices.length === 0) {
+                if (this.ghostLine) {
+                    this.drawingLayer.removeLayer(this.ghostLine);
+                    this.ghostLine = null;
+                }
+                return;
+            }
+
+            var lastVertex = this.state.vertices[this.state.vertices.length - 1];
+            var coords = [
+                [lastVertex.lat, lastVertex.lng],
+                [latlng.lat, latlng.lng]
+            ];
+
+            if (this.ghostLine) {
+                this.ghostLine.setLatLngs(coords);
+            } else {
+                this.ghostLine = L.polyline(coords, {
+                    color: this.options.style.strokeColor,
+                    weight: 2,
+                    dashArray: '5, 10',
+                    opacity: 0.5
+                }).addTo(this.drawingLayer);
+            }
+        },
+
+        /**
+         * Check if cursor is near first vertex and show close hint
+         */
+        _checkCloseHint: function(latlng) {
+            if (this.state.vertices.length < 3 || !this.vertexMarkers[0]) {
+                this._hideCloseHint();
+                return;
+            }
+
+            var firstVertex = this.state.vertices[0];
+            var distance = this._distanceBetween(
+                firstVertex.lat, firstVertex.lng,
+                latlng.lat, latlng.lng
+            );
+
+            // Show hint if within 20 meters (adjustable)
+            var closeThreshold = 20;
+            if (distance <= closeThreshold) {
+                this._showCloseHint();
+            } else {
+                this._hideCloseHint();
+            }
+        },
+
+        /**
+         * Show close polygon hint on first vertex
+         */
+        _showCloseHint: function() {
+            if (this._closeHintShown) return;
+            this._closeHintShown = true;
+
+            var firstMarker = this.vertexMarkers[0];
+            if (firstMarker) {
+                // Enlarge first marker
+                firstMarker.setRadius(10);
+                firstMarker.setStyle({ weight: 4 });
+
+                // Add tooltip
+                if (!this.closeHintTooltip) {
+                    this.closeHintTooltip = L.tooltip({
+                        permanent: true,
+                        direction: 'top',
+                        className: 'gis-close-hint-tooltip',
+                        offset: [0, -10]
+                    })
+                    .setContent('Click to close')
+                    .setLatLng([this.state.vertices[0].lat, this.state.vertices[0].lng]);
+
+                    this.closeHintTooltip.addTo(this.map);
+                }
+            }
+        },
+
+        /**
+         * Hide close polygon hint
+         */
+        _hideCloseHint: function() {
+            if (!this._closeHintShown) return;
+            this._closeHintShown = false;
+
+            var firstMarker = this.vertexMarkers[0];
+            if (firstMarker) {
+                // Restore first marker size
+                firstMarker.setRadius(6);
+                firstMarker.setStyle({ weight: 3 });
+            }
+
+            // Remove tooltip
+            if (this.closeHintTooltip) {
+                this.map.removeLayer(this.closeHintTooltip);
+                this.closeHintTooltip = null;
+            }
+        },
+
+        /**
+         * Start Walk Mode
+         */
+        _startWalkMode: function() {
+            var self = this;
+            this.state.mode = 'WALK';
+            this.state.phase = 'DRAWING';
+            this.state.vertices = [];
+            this.state.gpsAccuracyValues = [];  // Reset GPS accuracy tracking
+
+            // Add GPS panel
+            this._addGPSPanel();
+
+            // Add Mark Corner button
+            this._addMarkCornerButton();
+
+            // Start GPS tracking
+            this._startGPSTracking();
+        },
+
+        /**
+         * Add GPS status panel
+         */
+        _addGPSPanel: function() {
+            if (this.gpsPanel) {
+                this.gpsPanel.remove();
+            }
+
+            this.gpsPanel = document.createElement('div');
+            this.gpsPanel.className = 'gis-gps-panel';
+            this.gpsPanel.setAttribute('role', 'status');
+            this.gpsPanel.setAttribute('aria-label', 'GPS accuracy status');
+            this.gpsPanel.innerHTML =
+                '<div class="gis-gps-header">' +
+                    '<span class="gis-gps-icon">&#128225;</span>' +
+                    '<span class="gis-gps-title">GPS ACCURACY</span>' +
+                '</div>' +
+                '<div class="gis-gps-bar-container">' +
+                    '<div class="gis-gps-bar">' +
+                        '<div class="gis-gps-bar-fill"></div>' +
+                    '</div>' +
+                    '<span class="gis-gps-accuracy-value">Searching...</span>' +
+                '</div>' +
+                '<div class="gis-gps-status-text">' +
+                    '<span class="gis-gps-indicator searching"></span>' +
+                    '<span class="gis-gps-status-label">Acquiring GPS signal...</span>' +
+                '</div>';
+
+            this.wrapper.appendChild(this.gpsPanel);
+        },
+
+        /**
+         * Add Mark Corner button
+         */
+        _addMarkCornerButton: function() {
+            var self = this;
+
+            if (this.markBtn) {
+                this.markBtn.remove();
+            }
+
+            this.markBtn = document.createElement('button');
+            this.markBtn.type = 'button';
+            this.markBtn.className = 'gis-mark-corner-btn';
+            this.markBtn.innerHTML = '📍 Mark Corner';
+            this.markBtn.setAttribute('aria-label', 'Mark current GPS position as polygon corner');
+            this.markBtn.disabled = true;
+            this.markBtn.onclick = function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (self.state.currentPosition) {
+                    // Track GPS accuracy for this vertex
+                    if (self.state.gpsAccuracy !== null) {
+                        self.state.gpsAccuracyValues.push(self.state.gpsAccuracy);
+                    }
+                    self._addVertex(
+                        self.state.currentPosition.lat,
+                        self.state.currentPosition.lng
+                    );
+                }
+            };
+
+            this.wrapper.appendChild(this.markBtn);
+        },
+
+        /**
+         * Start GPS tracking
+         */
+        _startGPSTracking: function() {
+            var self = this;
+
+            if (!navigator.geolocation) {
+                this._showToast('GPS not available on this device', 'error');
+                return;
+            }
+
+            var gpsOptions = {
+                enableHighAccuracy: this.options.gps.highAccuracy,
+                timeout: 10000,
+                maximumAge: 0
+            };
+
+            this.state.gpsWatchId = navigator.geolocation.watchPosition(
+                function(position) {
+                    self._onGPSPosition(position);
+                },
+                function(error) {
+                    self._onGPSError(error);
+                },
+                gpsOptions
+            );
+        },
+
+        /**
+         * Handle GPS position update
+         */
+        _onGPSPosition: function(position) {
+            var lat = position.coords.latitude;
+            var lng = position.coords.longitude;
+            var accuracy = position.coords.accuracy;
+
+            this.state.currentPosition = { lat: lat, lng: lng };
+            this.state.gpsAccuracy = accuracy;
+
+            // Update GPS panel
+            this._updateGPSPanel(accuracy);
+
+            // Update position marker
+            this._updatePositionMarker(lat, lng, accuracy);
+
+            // Enable mark button
+            if (this.markBtn) {
+                this.markBtn.disabled = false;
+            }
+
+            // Center map on first fix
+            if (!this.map._gpsFixed) {
+                this.map.setView([lat, lng], 17);
+                this.map._gpsFixed = true;
+            }
+        },
+
+        /**
+         * Update GPS panel display
+         */
+        _updateGPSPanel: function(accuracy) {
+            if (!this.gpsPanel) return;
+
+            var barFill = this.gpsPanel.querySelector('.gis-gps-bar-fill');
+            var accuracyValue = this.gpsPanel.querySelector('.gis-gps-accuracy-value');
+            var indicator = this.gpsPanel.querySelector('.gis-gps-indicator');
+            var statusLabel = this.gpsPanel.querySelector('.gis-gps-status-label');
+
+            // Determine accuracy level and bar percentage
+            var level, barPercent, statusText;
+
+            if (accuracy <= 3) {
+                level = 'excellent';
+                barPercent = 100;
+                statusText = 'Excellent - Ready to mark';
+            } else if (accuracy <= 5) {
+                level = 'good';
+                barPercent = 80;
+                statusText = 'Good - Ready to mark';
+            } else if (accuracy <= 10) {
+                level = 'fair';
+                barPercent = 60;
+                statusText = 'Fair - Wait if possible';
+            } else if (accuracy <= 20) {
+                level = 'poor';
+                barPercent = 40;
+                statusText = 'Poor - Move to open area';
+            } else {
+                level = 'very-poor';
+                barPercent = 20;
+                statusText = 'Very poor - Check GPS settings';
+            }
+
+            // Update bar fill
+            if (barFill) {
+                barFill.style.width = barPercent + '%';
+                barFill.className = 'gis-gps-bar-fill ' + level;
+            }
+
+            // Update accuracy value
+            if (accuracyValue) {
+                accuracyValue.textContent = '±' + Math.round(accuracy) + 'm';
+                accuracyValue.className = 'gis-gps-accuracy-value ' + level;
+            }
+
+            // Update indicator
+            if (indicator) {
+                indicator.className = 'gis-gps-indicator ' + level;
+            }
+
+            // Update status label
+            if (statusLabel) {
+                statusLabel.textContent = statusText;
+                statusLabel.className = 'gis-gps-status-label ' + level;
+            }
+        },
+
+        /**
+         * Update position marker on map
+         */
+        _updatePositionMarker: function(lat, lng, accuracy) {
+            if (this.positionMarker) {
+                this.positionMarker.setLatLng([lat, lng]);
+                if (this.accuracyCircle) {
+                    this.accuracyCircle.setLatLng([lat, lng]);
+                    this.accuracyCircle.setRadius(accuracy);
+                }
+            } else {
+                // Create marker
+                this.positionMarker = L.circleMarker([lat, lng], {
+                    radius: 8,
+                    fillColor: '#4285f4',
+                    fillOpacity: 1,
+                    color: 'white',
+                    weight: 2
+                }).addTo(this.map);
+
+                // Create accuracy circle
+                this.accuracyCircle = L.circle([lat, lng], {
+                    radius: accuracy,
+                    fillColor: '#4285f4',
+                    fillOpacity: 0.1,
+                    color: '#4285f4',
+                    weight: 1
+                }).addTo(this.map);
+            }
+        },
+
+        /**
+         * Handle GPS error
+         */
+        _onGPSError: function(error) {
+            console.error('[GISCapture] GPS error:', error);
+            this._showToast('GPS error: ' + error.message, 'error');
+        },
+
+        /**
+         * Add a vertex to the polygon
+         */
+        _addVertex: function(lat, lng) {
+            // Check if at vertex limit
+            var maxVertices = this.options.validation.maxVertices || 100;
+            if (this.state.vertices.length >= maxVertices) {
+                this._showToast('Maximum corners reached (' + maxVertices + ')', 'error');
+                this._announce('Cannot add more corners. Maximum ' + maxVertices + ' reached.');
+                return;
+            }
+
+            var vertex = { lat: lat, lng: lng };
+            this.state.vertices.push(vertex);
+
+            // Add marker
+            this._addVertexMarker(vertex, this.state.vertices.length - 1);
+
+            // Update polygon
+            this._updatePolygon();
+
+            // Calculate metrics
+            this._calculateMetrics();
+
+            // Show info panel
+            this._updateInfoPanel();
+
+            // Check if close to start (Walk Mode)
+            if (this.state.mode === 'WALK' && this.state.vertices.length >= 3) {
+                this._checkAutoClose();
+            }
+
+            // Check for real-time warnings
+            this._checkSelfIntersection();
+            this._checkAreaWarnings();
+            this._checkVertexLimitWarning();
+
+            // Haptic feedback on mobile
+            if (navigator.vibrate) {
+                navigator.vibrate(50);
+            }
+
+            this._showToast('Corner ' + this.state.vertices.length + ' marked', 'success');
+
+            // Screen reader announcement with metrics
+            var announcement = 'Corner ' + this.state.vertices.length + ' marked';
+            if (this.state.metrics && this.state.vertices.length >= 3) {
+                announcement += '. Area ' + this.state.metrics.areaHectares.toFixed(2) + ' hectares';
+            }
+            this._announce(announcement);
+        },
+
+        /**
+         * Add vertex marker to map
+         */
+        _addVertexMarker: function(vertex, index) {
+            var self = this;
+            var isFirst = index === 0;
+            var vertexNumber = index + 1;
+
+            // Create numbered marker using DivIcon
+            var markerIcon = L.divIcon({
+                className: 'gis-numbered-vertex' + (isFirst ? ' first' : ''),
+                html: '<span>' + vertexNumber + '</span>',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            });
+
+            var marker = L.marker([vertex.lat, vertex.lng], {
+                icon: markerIcon,
+                draggable: false
+            }).addTo(this.drawingLayer);
+
+            // Store reference for close hint functionality (create a pseudo circleMarker interface)
+            marker._isNumberedMarker = true;
+            marker._originalIcon = markerIcon;
+            marker.setRadius = function(r) {
+                // Update icon size based on radius
+                var size = r * 4;
+                var newIcon = L.divIcon({
+                    className: 'gis-numbered-vertex' + (isFirst ? ' first' : '') + (r > 6 ? ' enlarged' : ''),
+                    html: '<span>' + vertexNumber + '</span>',
+                    iconSize: [size, size],
+                    iconAnchor: [size/2, size/2]
+                });
+                marker.setIcon(newIcon);
+            };
+            marker.setStyle = function() {}; // No-op for compatibility
+
+            // Make draggable in edit mode
+            marker.on('mousedown', function(e) {
+                if (self.state.phase === 'DRAWING' || self.state.phase === 'PREVIEW') {
+                    self._startVertexDrag(index, e);
+                }
+            });
+
+            // Click on first vertex to close polygon, or select vertex for deletion
+            marker.on('click', function(e) {
+                L.DomEvent.stopPropagation(e);
+
+                // If drawing and this is the first vertex with 3+ vertices, close polygon
+                if (isFirst && self.state.vertices.length >= 3 && self.state.phase === 'DRAWING') {
+                    self._completePolygon();
+                    return;
+                }
+
+                // In preview/edit mode, select vertex for deletion
+                if (self.state.phase === 'PREVIEW' || self.state.phase === 'DRAWING') {
+                    if (self.state.selectedVertexIndex === index) {
+                        // Already selected - deselect
+                        self._deselectVertex();
+                    } else {
+                        // Select this vertex
+                        self._selectVertex(index);
+                        self._showToast('Press Delete to remove corner ' + (index + 1), 'info');
+                    }
+                }
+            });
+
+            this.vertexMarkers.push(marker);
+        },
+
+        /**
+         * Rebuild all vertex markers (after deletion or insertion)
+         */
+        _rebuildAllMarkers: function() {
+            var self = this;
+
+            // Clear existing vertex markers
+            this.vertexMarkers.forEach(function(m) {
+                self.drawingLayer.removeLayer(m);
+            });
+            this.vertexMarkers = [];
+
+            // Clear midpoint markers
+            this._clearMidpointMarkers();
+
+            // Rebuild vertex markers
+            this.state.vertices.forEach(function(v, i) {
+                self._addVertexMarker(v, i);
+            });
+
+            // Add midpoint markers if we have a complete polygon
+            if (this.state.vertices.length >= 3 && this.state.phase === 'PREVIEW') {
+                this._addMidpointMarkers();
+            }
+        },
+
+        /**
+         * Add midpoint handles on polygon edges
+         */
+        _addMidpointMarkers: function() {
+            var self = this;
+            this._clearMidpointMarkers();
+
+            if (this.state.vertices.length < 3) return;
+
+            var vertices = this.state.vertices;
+            for (var i = 0; i < vertices.length; i++) {
+                var v1 = vertices[i];
+                var v2 = vertices[(i + 1) % vertices.length];
+
+                // Calculate midpoint
+                var midLat = (v1.lat + v2.lat) / 2;
+                var midLng = (v1.lng + v2.lng) / 2;
+
+                // Create midpoint marker
+                var midpointIcon = L.divIcon({
+                    className: 'gis-midpoint-handle',
+                    html: '<div class="gis-midpoint-diamond"></div>',
+                    iconSize: [12, 12],
+                    iconAnchor: [6, 6]
+                });
+
+                var marker = L.marker([midLat, midLng], {
+                    icon: midpointIcon,
+                    draggable: true
+                }).addTo(this.drawingLayer);
+
+                // Store the edge index
+                marker._edgeIndex = i;
+
+                // Drag handler - insert new vertex
+                marker.on('dragend', function(e) {
+                    var edgeIndex = e.target._edgeIndex;
+                    var newPos = e.target.getLatLng();
+
+                    // Insert new vertex after edgeIndex
+                    self.state.vertices.splice(edgeIndex + 1, 0, {
+                        lat: newPos.lat,
+                        lng: newPos.lng
+                    });
+
+                    // Rebuild everything
+                    self._rebuildAllMarkers();
+                    self._updatePolygon();
+                    self._calculateMetrics();
+                    self._updateInfoPanel();
+                    self._checkSelfIntersection();
+                    self._checkAreaWarnings();
+                    self._saveToHiddenField();
+
+                    // Re-check overlaps after adding new vertex in preview mode
+                    if (self.state.phase === 'PREVIEW') {
+                        self._checkOverlaps();
+                    }
+
+                    self._showToast('Corner ' + (edgeIndex + 2) + ' added', 'success');
+                });
+
+                // Visual feedback on hover
+                marker.on('mouseover', function() {
+                    this.getElement().classList.add('hover');
+                });
+                marker.on('mouseout', function() {
+                    this.getElement().classList.remove('hover');
+                });
+
+                this.midpointMarkers.push(marker);
+            }
+        },
+
+        /**
+         * Clear midpoint markers
+         */
+        _clearMidpointMarkers: function() {
+            var self = this;
+            this.midpointMarkers.forEach(function(m) {
+                self.drawingLayer.removeLayer(m);
+            });
+            this.midpointMarkers = [];
+        },
+
+        /**
+         * Check for self-intersection and highlight crossing edges
+         */
+        _checkSelfIntersection: function() {
+            var self = this;
+            this._clearIntersectionHighlights();
+
+            if (this.state.vertices.length < 4) {
+                this._hideWarning('intersection');
+                return false;
+            }
+
+            try {
+                var geojson = this._toGeoJSON();
+                if (!geojson) return false;
+
+                var kinks = turf.kinks(geojson);
+
+                if (kinks.features.length > 0) {
+                    // Store intersection points
+                    this.state.intersectionPoints = kinks.features.map(function(f) {
+                        return {
+                            lat: f.geometry.coordinates[1],
+                            lng: f.geometry.coordinates[0]
+                        };
+                    });
+
+                    // Find and highlight intersecting edges
+                    this._highlightIntersectingEdges(kinks.features);
+
+                    // Show warning
+                    this._showWarning('intersection', 'Boundary lines are crossing. Adjust the corners to fix this.');
+                    return true;
+                } else {
+                    this._hideWarning('intersection');
+                    return false;
+                }
+            } catch (e) {
+                console.warn('[GISCapture] Self-intersection check failed:', e);
+                return false;
+            }
+        },
+
+        /**
+         * Highlight edges that intersect
+         */
+        _highlightIntersectingEdges: function(intersectionFeatures) {
+            var self = this;
+            var vertices = this.state.vertices;
+
+            // Find which edges contain the intersection points
+            var edgesToHighlight = new Set();
+
+            intersectionFeatures.forEach(function(feature) {
+                var pt = turf.point(feature.geometry.coordinates);
+
+                // Check each edge
+                for (var i = 0; i < vertices.length; i++) {
+                    var v1 = vertices[i];
+                    var v2 = vertices[(i + 1) % vertices.length];
+                    var line = turf.lineString([[v1.lng, v1.lat], [v2.lng, v2.lat]]);
+                    var distance = turf.pointToLineDistance(pt, line, { units: 'meters' });
+
+                    if (distance < 1) { // Within 1 meter of the edge
+                        edgesToHighlight.add(i);
+                    }
+                }
+            });
+
+            // Draw red lines for intersecting edges
+            edgesToHighlight.forEach(function(i) {
+                var v1 = vertices[i];
+                var v2 = vertices[(i + 1) % vertices.length];
+
+                var line = L.polyline([
+                    [v1.lat, v1.lng],
+                    [v2.lat, v2.lng]
+                ], {
+                    color: '#dc3545',
+                    weight: 5,
+                    opacity: 0.8
+                }).addTo(self.drawingLayer);
+
+                self.intersectingEdgeLines.push(line);
+            });
+
+            // Add markers at intersection points
+            intersectionFeatures.forEach(function(feature) {
+                var marker = L.circleMarker([
+                    feature.geometry.coordinates[1],
+                    feature.geometry.coordinates[0]
+                ], {
+                    radius: 8,
+                    fillColor: '#dc3545',
+                    fillOpacity: 1,
+                    color: 'white',
+                    weight: 2
+                }).addTo(self.drawingLayer);
+
+                // Add warning icon tooltip
+                marker.bindTooltip('Lines crossing', {
+                    permanent: false,
+                    direction: 'top',
+                    className: 'gis-intersection-tooltip'
+                });
+
+                self.intersectionMarkers.push(marker);
+            });
+        },
+
+        /**
+         * Clear intersection highlights
+         */
+        _clearIntersectionHighlights: function() {
+            var self = this;
+
+            this.intersectingEdgeLines.forEach(function(line) {
+                self.drawingLayer.removeLayer(line);
+            });
+            this.intersectingEdgeLines = [];
+
+            this.intersectionMarkers.forEach(function(marker) {
+                self.drawingLayer.removeLayer(marker);
+            });
+            this.intersectionMarkers = [];
+
+            this.state.intersectionPoints = [];
+        },
+
+        /**
+         * Check area warnings and display them
+         */
+        _checkAreaWarnings: function() {
+            var metrics = this.state.metrics;
+            var validation = this.options.validation;
+
+            if (!metrics) {
+                this._hideWarning('area');
+                return;
+            }
+
+            var warnings = [];
+
+            // Check minimum area
+            if (validation.minAreaHectares && metrics.areaHectares < validation.minAreaHectares) {
+                warnings.push('Area (' + metrics.areaHectares.toFixed(4) + ' ha) is very small (minimum: ' + validation.minAreaHectares + ' ha)');
+            }
+
+            // Check maximum area
+            if (validation.maxAreaHectares && metrics.areaHectares > validation.maxAreaHectares) {
+                warnings.push('Area (' + metrics.areaHectares.toFixed(2) + ' ha) exceeds maximum (' + validation.maxAreaHectares + ' ha)');
+            }
+
+            if (warnings.length > 0) {
+                this._showWarning('area', warnings.join('. '));
+            } else {
+                this._hideWarning('area');
+            }
+        },
+
+        /**
+         * Check vertex limit warning (at 90% of max)
+         */
+        _checkVertexLimitWarning: function() {
+            var validation = this.options.validation;
+            var vertexCount = this.state.vertices.length;
+            var maxVertices = validation.maxVertices || 100;
+
+            // Calculate 90% threshold
+            var warningThreshold = Math.floor(maxVertices * 0.9);
+
+            if (vertexCount >= maxVertices) {
+                // At or over limit - show error
+                this._showWarning('vertexLimit', 'Maximum corners reached (' + vertexCount + '/' + maxVertices + '). Cannot add more.');
+            } else if (vertexCount >= warningThreshold) {
+                // Approaching limit - show warning
+                this._showWarning('vertexLimit', 'Corners: ' + vertexCount + '/' + maxVertices + ' - approaching limit. Consider simplifying.');
+            } else {
+                this._hideWarning('vertexLimit');
+            }
+        },
+
+        /**
+         * Show a warning message
+         */
+        _showWarning: function(type, message) {
+            if (!this.warningPanel) return;
+
+            // Check if this warning type already exists
+            var existingWarning = this.warningPanel.querySelector('[data-warning-type="' + type + '"]');
+            if (existingWarning) {
+                existingWarning.querySelector('.gis-warning-text').textContent = message;
+                return;
+            }
+
+            var warningDiv = document.createElement('div');
+            warningDiv.className = 'gis-warning-item ' + type;
+            warningDiv.setAttribute('data-warning-type', type);
+            warningDiv.innerHTML = '<span class="gis-warning-icon">⚠</span><span class="gis-warning-text">' + message + '</span>';
+
+            this.warningPanel.appendChild(warningDiv);
+            this.warningPanel.style.display = 'block';
+        },
+
+        /**
+         * Hide a specific warning type
+         */
+        _hideWarning: function(type) {
+            if (!this.warningPanel) return;
+
+            var existingWarning = this.warningPanel.querySelector('[data-warning-type="' + type + '"]');
+            if (existingWarning) {
+                existingWarning.remove();
+            }
+
+            // Hide panel if no warnings left
+            if (this.warningPanel.children.length === 0) {
+                this.warningPanel.style.display = 'none';
+            }
+        },
+
+        /**
+         * Clear all warnings
+         */
+        _clearAllWarnings: function() {
+            if (this.warningPanel) {
+                this.warningPanel.innerHTML = '';
+                this.warningPanel.style.display = 'none';
+            }
+        },
+
+        /**
+         * Update polygon on map
+         */
+        _updatePolygon: function() {
+            if (this.state.polygon) {
+                this.drawingLayer.removeLayer(this.state.polygon);
+            }
+
+            if (this.state.vertices.length < 2) return;
+
+            var coords = this.state.vertices.map(function(v) {
+                return [v.lat, v.lng];
+            });
+
+            // Close the polygon
+            if (this.state.vertices.length >= 3) {
+                coords.push([this.state.vertices[0].lat, this.state.vertices[0].lng]);
+            }
+
+            this.state.polygon = L.polygon(coords, {
+                fillColor: this.options.style.fillColor,
+                fillOpacity: this.options.style.fillOpacity,
+                color: this.options.style.strokeColor,
+                weight: this.options.style.strokeWidth
+            }).addTo(this.drawingLayer);
+        },
+
+        /**
+         * Calculate metrics using Turf.js
+         */
+        _calculateMetrics: function() {
+            if (this.state.vertices.length < 3) {
+                this.state.metrics = null;
+                return;
+            }
+
+            try {
+                var coords = this.state.vertices.map(function(v) {
+                    return [v.lng, v.lat]; // GeoJSON is [lng, lat]
+                });
+                coords.push(coords[0]); // Close the ring
+
+                var polygon = turf.polygon([coords]);
+                var area = turf.area(polygon);
+                var areaHectares = area / 10000;
+                var perimeter = turf.length(turf.polygonToLine(polygon), { units: 'meters' });
+                var centroid = turf.centroid(polygon);
+
+                this.state.metrics = {
+                    areaSquareMeters: area,
+                    areaHectares: areaHectares,
+                    perimeterMeters: perimeter,
+                    centroid: {
+                        lat: centroid.geometry.coordinates[1],
+                        lng: centroid.geometry.coordinates[0]
+                    },
+                    vertexCount: this.state.vertices.length
+                };
+
+                // Callback
+                if (this.options.onGeometryChange) {
+                    this.options.onGeometryChange(this._toGeoJSON(), this.state.metrics);
+                }
+
+            } catch (e) {
+                console.error('[GISCapture] Metrics calculation error:', e);
+            }
+        },
+
+        /**
+         * Update info panel
+         */
+        _updateInfoPanel: function() {
+            if (!this.state.metrics) {
+                this.infoPanel.style.display = 'none';
+                return;
+            }
+
+            this.infoPanel.style.display = 'flex';
+            var html =
+                '<div class="gis-info-item">' +
+                    '<span class="gis-info-label">Area</span>' +
+                    '<span class="gis-info-value highlight">' +
+                        this.state.metrics.areaHectares.toFixed(2) + ' ha</span>' +
+                '</div>' +
+                '<div class="gis-info-item">' +
+                    '<span class="gis-info-label">Perimeter</span>' +
+                    '<span class="gis-info-value">' +
+                        this.state.metrics.perimeterMeters.toFixed(0) + ' m</span>' +
+                '</div>' +
+                '<div class="gis-info-item">' +
+                    '<span class="gis-info-label">Corners</span>' +
+                    '<span class="gis-info-value">' +
+                        this.state.metrics.vertexCount + '</span>' +
+                '</div>';
+
+            // Show GPS average for Walk Mode
+            if (this.state.mode === 'WALK' && this.state.gpsAccuracyValues.length > 0) {
+                var avgAccuracy = this._calculateGPSAverage();
+                html += '<div class="gis-info-item">' +
+                    '<span class="gis-info-label">GPS Avg</span>' +
+                    '<span class="gis-info-value">±' + avgAccuracy + 'm</span>' +
+                '</div>';
+            }
+
+            this.infoPanel.innerHTML = html;
+        },
+
+        /**
+         * Calculate average GPS accuracy from tracked values
+         */
+        _calculateGPSAverage: function() {
+            if (this.state.gpsAccuracyValues.length === 0) return 0;
+
+            var sum = this.state.gpsAccuracyValues.reduce(function(a, b) {
+                return a + b;
+            }, 0);
+            return Math.round(sum / this.state.gpsAccuracyValues.length);
+        },
+
+        /**
+         * Check if should auto-close polygon (Walk Mode)
+         */
+        _checkAutoClose: function() {
+            if (!this.state.currentPosition || this.state.vertices.length < 3) return;
+
+            var start = this.state.vertices[0];
+            var distance = this._distanceBetween(
+                start.lat, start.lng,
+                this.state.currentPosition.lat, this.state.currentPosition.lng
+            );
+
+            if (distance <= this.options.gps.autoCloseDistance) {
+                this._showAutoClosePrompt();
+            }
+        },
+
+        /**
+         * Show auto-close prompt
+         */
+        _showAutoClosePrompt: function() {
+            var self = this;
+
+            if (this._autoCloseShown) return;
+            this._autoCloseShown = true;
+
+            var toast = document.createElement('div');
+            toast.className = 'gis-toast warning';
+            toast.innerHTML = 'Close to start point. <button>Close Polygon</button>';
+            toast.querySelector('button').onclick = function() {
+                toast.remove();
+                self._completePolygon();
+            };
+
+            var container = document.createElement('div');
+            container.className = 'gis-toast-container';
+            container.appendChild(toast);
+            this.wrapper.appendChild(container);
+
+            setTimeout(function() {
+                container.remove();
+                self._autoCloseShown = false;
+            }, 5000);
+        },
+
+        /**
+         * Complete polygon drawing
+         */
+        _completePolygon: function() {
+            if (this.state.vertices.length < 3) {
+                this._showToast('Need at least 3 corners', 'error');
+                return;
+            }
+
+            // Stop GPS tracking
+            if (this.state.gpsWatchId) {
+                navigator.geolocation.clearWatch(this.state.gpsWatchId);
+            }
+
+            // Clean up Draw Mode specific handlers
+            if (this._boundMouseMoveHandler) {
+                this.map.off('mousemove', this._boundMouseMoveHandler);
+                this._boundMouseMoveHandler = null;
+            }
+            if (this._boundDblClickHandler) {
+                this.map.off('dblclick', this._boundDblClickHandler);
+                this._boundDblClickHandler = null;
+            }
+
+            // Re-enable double-click zoom
+            this.map.doubleClickZoom.enable();
+
+            // Note: Keep keyboard handler active for Delete key in preview mode
+
+            // Remove ghost line
+            if (this.ghostLine) {
+                this.drawingLayer.removeLayer(this.ghostLine);
+                this.ghostLine = null;
+            }
+
+            // Hide close hint
+            this._hideCloseHint();
+
+            this.state.phase = 'PREVIEW';
+
+            // Update step progress to step 2
+            this._addStepProgress(2);
+
+            this._renderPreviewState();
+
+            // Validate
+            this._validate();
+
+            // Save to hidden field
+            this._saveToHiddenField();
+
+            // Check for overlaps with existing records
+            this._checkOverlaps();
+        },
+
+        /**
+         * Render preview state
+         */
+        _renderPreviewState: function() {
+            var self = this;
+
+            // Remove mode-specific UI
+            if (this.markBtn) this.markBtn.remove();
+            if (this.gpsPanel) this.gpsPanel.remove();
+
+            // Reset cursor
+            this.mapContainer.style.cursor = '';
+
+            // Update toolbar for preview
+            this._addPreviewToolbar();
+
+            // Set up keyboard handler for Delete key if not already set
+            if (!this._boundKeyDownHandler) {
+                this._boundKeyDownHandler = function(e) {
+                    self._handleKeyDown(e);
+                };
+                document.addEventListener('keydown', this._boundKeyDownHandler);
+            }
+
+            // Add midpoint markers for editing
+            this._addMidpointMarkers();
+
+            // Check for warnings
+            this._checkSelfIntersection();
+            this._checkAreaWarnings();
+
+            // Fit map to polygon
+            if (this.state.polygon) {
+                this.map.fitBounds(this.state.polygon.getBounds(), { padding: [50, 50] });
+            }
+        },
+
+        /**
+         * Add preview toolbar
+         */
+        _addPreviewToolbar: function() {
+            var self = this;
+
+            if (this.toolbar) {
+                this.toolbar.remove();
+            }
+
+            this.toolbar = document.createElement('div');
+            this.toolbar.className = 'gis-toolbar';
+
+            // Edit button
+            var editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'gis-toolbar-btn';
+            editBtn.innerHTML = '✏️ Edit';
+            editBtn.setAttribute('aria-label', 'Edit polygon boundary');
+            editBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); self._enterEditMode(); };
+            this.toolbar.appendChild(editBtn);
+
+            // Redraw button
+            var redrawBtn = document.createElement('button');
+            redrawBtn.type = 'button';
+            redrawBtn.className = 'gis-toolbar-btn danger';
+            redrawBtn.innerHTML = '🔄 Redraw';
+            redrawBtn.setAttribute('aria-label', 'Clear and redraw polygon');
+            redrawBtn.onclick = function(e) { e.preventDefault(); e.stopPropagation(); self._redraw(); };
+            this.toolbar.appendChild(redrawBtn);
+
+            this.wrapper.insertBefore(this.toolbar, this.mapContainer);
+        },
+
+        /**
+         * Enter edit mode
+         */
+        _enterEditMode: function() {
+            var self = this;
+            this.state.mode = 'DRAW';
+            this.state.phase = 'DRAWING';
+            this.mapContainer.style.cursor = 'crosshair';
+
+            // Clear midpoint markers (will show during drawing as ghost line instead)
+            this._clearMidpointMarkers();
+
+            // Clear overlap display (will recheck when editing is complete)
+            this._clearOverlapDisplay();
+            this._hideOverlapPanel();
+            this.state.overlapChecked = false;
+
+            // Update step progress back to step 1
+            this._addStepProgress(1);
+
+            this._addDrawToolbar();
+
+            // Re-enable ghost line tracking
+            this._boundMouseMoveHandler = function(e) {
+                self._updateGhostLine(e.latlng);
+                self._checkCloseHint(e.latlng);
+            };
+            this.map.on('mousemove', this._boundMouseMoveHandler);
+
+            // Re-enable double-click to finish
+            this._boundDblClickHandler = function(e) {
+                L.DomEvent.preventDefault(e);
+                L.DomEvent.stopPropagation(e);
+                if (self.state.vertices.length >= 3) {
+                    self._completePolygon();
+                }
+            };
+            this.map.on('dblclick', this._boundDblClickHandler);
+
+            // Set up keyboard handler for Delete key if not already set
+            if (!this._boundKeyDownHandler) {
+                this._boundKeyDownHandler = function(e) {
+                    self._handleKeyDown(e);
+                };
+                document.addEventListener('keydown', this._boundKeyDownHandler);
+            }
+
+            // Disable map double-click zoom during drawing
+            this.map.doubleClickZoom.disable();
+        },
+
+        /**
+         * Redraw polygon
+         */
+        _redraw: function() {
+            // Clean up handlers
+            if (this._boundMouseMoveHandler) {
+                this.map.off('mousemove', this._boundMouseMoveHandler);
+                this._boundMouseMoveHandler = null;
+            }
+            if (this._boundDblClickHandler) {
+                this.map.off('dblclick', this._boundDblClickHandler);
+                this._boundDblClickHandler = null;
+            }
+            this.map.doubleClickZoom.enable();
+
+            // Remove step progress
+            if (this.stepProgress) {
+                this.stepProgress.remove();
+                this.stepProgress = null;
+            }
+
+            this._clearDrawing();
+            this._showEmptyState();
+        },
+
+        /**
+         * Validate polygon
+         */
+        _validate: function() {
+            var errors = [];
+            var warnings = [];
+            var validation = this.options.validation;
+            var metrics = this.state.metrics;
+
+            if (!metrics) return;
+
+            // Check area
+            if (metrics.areaHectares < validation.minAreaHectares) {
+                warnings.push('Area (' + metrics.areaHectares.toFixed(4) + ' ha) is very small');
+            }
+            if (metrics.areaHectares > validation.maxAreaHectares) {
+                warnings.push('Area (' + metrics.areaHectares.toFixed(2) + ' ha) exceeds maximum');
+            }
+
+            // Check vertices
+            if (metrics.vertexCount < validation.minVertices) {
+                errors.push('Need at least ' + validation.minVertices + ' corners');
+            }
+            if (metrics.vertexCount > validation.maxVertices) {
+                warnings.push('Too many corners (' + metrics.vertexCount + '). Consider simplifying.');
+            }
+
+            // Check self-intersection
+            if (!validation.allowSelfIntersection) {
+                try {
+                    var geojson = this._toGeoJSON();
+                    var kinks = turf.kinks(geojson);
+                    if (kinks.features.length > 0) {
+                        errors.push('Boundary lines are crossing');
+                    }
+                } catch (e) {
+                    console.warn('[GISCapture] Self-intersection check failed:', e);
+                }
+            }
+
+            // Display validation results
+            this._showValidation(errors, warnings);
+
+            if (errors.length > 0 && this.options.onValidationError) {
+                this.options.onValidationError(errors);
+            }
+        },
+
+        /**
+         * Show validation results
+         */
+        _showValidation: function(errors, warnings) {
+            if (errors.length === 0 && warnings.length === 0) {
+                this.validationPanel.style.display = 'block';
+                this.validationPanel.innerHTML = 
+                    '<div class="gis-validation-success">' +
+                        '<span>✓</span> Boundary captured successfully' +
+                    '</div>';
+                return;
+            }
+
+            var html = '';
+            errors.forEach(function(err) {
+                html += '<div class="gis-validation-error"><span>✗</span> ' + err + '</div>';
+            });
+            warnings.forEach(function(warn) {
+                html += '<div class="gis-validation-warning"><span>⚠</span> ' + warn + '</div>';
+            });
+
+            this.validationPanel.style.display = 'block';
+            this.validationPanel.innerHTML = html;
+        },
+
+        // =============================================
+        // OVERLAP CHECKING METHODS
+        // =============================================
+
+        /**
+         * Check for overlapping polygons if enabled
+         */
+        _checkOverlaps: function() {
+            var self = this;
+            var overlapConfig = this.options.overlap;
+
+            // Skip if overlap checking is not enabled
+            if (!overlapConfig || !overlapConfig.enabled) {
+                return;
+            }
+
+            // Skip if no geometry
+            var geojson = this._toGeoJSON();
+            if (!geojson) {
+                return;
+            }
+
+            // Clear previous overlaps
+            this._clearOverlapDisplay();
+            this.state.overlaps = [];
+            this.state.overlapChecked = false;
+            this.state.overlapConfirmed = false;
+
+            // Show loading state
+            this.state.overlapCheckPending = true;
+            this._showOverlapLoading();
+
+            // Build API request - endpoint is /gis/gis/checkOverlap per OpenAPI spec
+            var apiUrl = this.options.apiBase + '/checkOverlap';
+
+            // Parse displayFields into returnFields array
+            var returnFields = [];
+            if (overlapConfig.displayFields) {
+                returnFields = overlapConfig.displayFields.split(',').map(function(f) {
+                    return f.trim();
+                }).filter(function(f) {
+                    return f.length > 0;
+                });
+            }
+
+            // Build request body per server API spec
+            var targetConfig = {
+                formId: overlapConfig.formId || '',
+                geometryFieldId: overlapConfig.geometryField || 'c_geometry',
+                filterCondition: overlapConfig.filterCondition || null
+            };
+
+            // Exclude current record from overlap check when editing (Phase 4)
+            if (self.options.recordId) {
+                targetConfig.excludeRecordId = self.options.recordId;
+            }
+
+            var requestBody = {
+                geometry: geojson,
+                target: targetConfig,
+                options: {
+                    returnFields: returnFields,
+                    minOverlapPercent: 1.0,
+                    maxResults: 10,
+                    includeOverlapGeometry: true
+                }
+            };
+
+            // Build headers with API authentication
+            var headers = {
+                'Content-Type': 'application/json'
+            };
+            if (this.options.apiId && this.options.apiKey) {
+                headers['api_id'] = this.options.apiId;
+                headers['api_key'] = this.options.apiKey;
+            }
+
+            // Make API call
+            fetch(apiUrl, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(requestBody)
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }
+                return response.json();
+            })
+            .then(function(response) {
+                self.state.overlapCheckPending = false;
+                self.state.overlapChecked = true;
+
+                // Joget API wraps response in { code, message: "JSON string" } format
+                // Need to parse the message field if it's a string
+                var parsedResponse = response;
+                if (response.message && typeof response.message === 'string') {
+                    try {
+                        parsedResponse = JSON.parse(response.message);
+                    } catch (e) {
+                        // Fall back to original response
+                    }
+                }
+
+                // Parse server response format: { success, data: { hasOverlaps, overlaps: [...] } }
+                var data = parsedResponse.data || parsedResponse;
+                var hasOverlaps = data.hasOverlaps || (data.overlaps && data.overlaps.length > 0);
+
+                if (hasOverlaps && data.overlaps && data.overlaps.length > 0) {
+
+                    // Transform server response to internal format
+                    var overlaps = data.overlaps.map(function(item) {
+                        return {
+                            id: item.recordId,
+                            geometry: item.overlapGeometry || null,
+                            displayValues: item.recordData || {},
+                            overlapArea: item.overlapAreaHectares,
+                            overlapPercentage: item.overlapPercentOfInput
+                        };
+                    });
+
+                    self.state.overlaps = overlaps;
+                    self._displayOverlaps(overlaps);
+                    self._showOverlapWarning(overlaps);
+                } else {
+                    self._hideOverlapPanel();
+                }
+            })
+            .catch(function(error) {
+                self.state.overlapCheckPending = false;
+                self._hideOverlapPanel();
+                // Don't block the user on API failure - just log the error
+                if (self.options.onError) {
+                    self.options.onError('Overlap check failed: ' + error.message);
+                }
+            });
+        },
+
+        /**
+         * Display overlapping areas on the map
+         * Server returns overlapGeometry (the intersection polygon) directly
+         */
+        _displayOverlaps: function(overlaps) {
+            var self = this;
+
+            // Clear previous display
+            this._clearOverlapDisplay();
+
+            overlaps.forEach(function(record) {
+                try {
+                    // The server returns overlapGeometry which is the intersection area
+                    var overlapGeojson = record.geometry;
+                    if (!overlapGeojson) {
+                        return;
+                    }
+
+                    // Parse geometry if it's a string
+                    if (typeof overlapGeojson === 'string') {
+                        overlapGeojson = JSON.parse(overlapGeojson);
+                    }
+
+                    // Handle both Polygon and the geometry wrapper
+                    var coordinates = overlapGeojson.coordinates;
+                    if (overlapGeojson.type === 'Feature') {
+                        coordinates = overlapGeojson.geometry.coordinates;
+                    }
+
+                    if (!coordinates || !coordinates[0]) {
+                        return;
+                    }
+
+                    // Get coordinates for Leaflet - convert [lng, lat] to [lat, lng]
+                    var coords = coordinates[0].map(function(c) {
+                        return [c[1], c[0]];
+                    });
+
+                    // Draw overlap area in red/orange
+                    var overlapLayer = L.polygon(coords, {
+                        fillColor: '#dc3545',
+                        fillOpacity: 0.4,
+                        color: '#dc3545',
+                        weight: 3
+                    }).addTo(self.overlapHighlightLayer);
+
+                    // Add popup with record info
+                    var popupContent = self._buildOverlapPopupContent(record);
+                    overlapLayer.bindPopup(popupContent);
+
+                } catch (e) {
+                    // Skip invalid geometries silently
+                }
+            });
+        },
+
+        /**
+         * Build popup content for overlapping record
+         */
+        _buildOverlapPopupContent: function(record) {
+            var html = '<div class="gis-overlap-popup">';
+            html += '<strong>Existing Record</strong><br>';
+
+            // Display configured fields
+            if (record.displayValues) {
+                Object.keys(record.displayValues).forEach(function(key) {
+                    html += '<span>' + key + ': ' + record.displayValues[key] + '</span><br>';
+                });
+            }
+
+            // Show overlap info
+            if (record.overlapArea !== undefined) {
+                html += '<br><span class="gis-overlap-info">Overlap: ' +
+                    record.overlapArea.toFixed(4) + ' ha';
+                if (record.overlapPercentage !== undefined) {
+                    html += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                }
+                html += '</span>';
+            }
+
+            html += '</div>';
+            return html;
+        },
+
+        /**
+         * Show overlap loading state
+         */
+        _showOverlapLoading: function() {
+            if (!this.overlapPanel) return;
+
+            this.overlapPanel.style.display = 'block';
+            this.overlapPanel.innerHTML =
+                '<div class="gis-overlap-loading">' +
+                    '<div class="gis-loading-spinner"></div>' +
+                    '<span>Checking for overlapping boundaries...</span>' +
+                '</div>';
+        },
+
+        /**
+         * Show overlap warning panel
+         */
+        _showOverlapWarning: function(overlaps) {
+            var self = this;
+            if (!this.overlapPanel) return;
+
+            // Calculate total overlap info
+            var totalOverlapArea = 0;
+            overlaps.forEach(function(record) {
+                if (record.overlapArea) {
+                    totalOverlapArea += record.overlapArea;
+                }
+            });
+
+            // Build record list HTML
+            var recordsHtml = '';
+            overlaps.forEach(function(record, index) {
+                var displayText = '';
+                if (record.displayValues) {
+                    var values = Object.values(record.displayValues);
+                    displayText = values.join(' - ');
+                } else if (record.id) {
+                    displayText = 'Record ' + record.id;
+                } else {
+                    displayText = 'Record ' + (index + 1);
+                }
+
+                var overlapInfo = '';
+                if (record.overlapArea !== undefined) {
+                    overlapInfo = record.overlapArea.toFixed(4) + ' ha';
+                    if (record.overlapPercentage !== undefined) {
+                        overlapInfo += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                    }
+                }
+
+                recordsHtml += '<li class="gis-overlap-item">' +
+                    '<span class="gis-overlap-record-name">' + displayText + '</span>' +
+                    (overlapInfo ? '<span class="gis-overlap-record-info">' + overlapInfo + '</span>' : '') +
+                    '</li>';
+            });
+
+            // Build panel HTML
+            this.overlapPanel.style.display = 'block';
+            this.overlapPanel.innerHTML =
+                '<div class="gis-overlap-header">' +
+                    '<span class="gis-overlap-icon">&#9888;</span>' +
+                    '<span class="gis-overlap-title">Overlap Detected</span>' +
+                '</div>' +
+                '<div class="gis-overlap-content">' +
+                    '<p>This boundary overlaps with ' + overlaps.length + ' existing record' +
+                        (overlaps.length > 1 ? 's' : '') + ':</p>' +
+                    '<ul class="gis-overlap-list">' + recordsHtml + '</ul>' +
+                    (totalOverlapArea > 0 ?
+                        '<p class="gis-overlap-total">Total overlap area: <strong>' +
+                            totalOverlapArea.toFixed(4) + ' ha</strong></p>' : '') +
+                '</div>' +
+                '<div class="gis-overlap-actions">' +
+                    '<button type="button" class="gis-btn gis-btn-secondary gis-overlap-adjust-btn">' +
+                        'Adjust Boundary' +
+                    '</button>' +
+                    '<button type="button" class="gis-btn gis-btn-warning gis-overlap-save-btn">' +
+                        'Save Anyway' +
+                    '</button>' +
+                '</div>';
+
+            // Bind button handlers
+            var adjustBtn = this.overlapPanel.querySelector('.gis-overlap-adjust-btn');
+            var saveBtn = this.overlapPanel.querySelector('.gis-overlap-save-btn');
+
+            if (adjustBtn) {
+                adjustBtn.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    self._handleOverlapAdjust();
+                };
+            }
+
+            if (saveBtn) {
+                saveBtn.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    self._handleOverlapSaveAnyway();
+                };
+            }
+        },
+
+        /**
+         * Handle "Adjust Boundary" button click
+         */
+        _handleOverlapAdjust: function() {
+            // Enter edit mode so user can adjust the boundary
+            this._enterEditMode();
+            this._hideOverlapPanel();
+            this._showToast('Adjust the boundary to avoid overlaps', 'info');
+        },
+
+        /**
+         * Handle "Save Anyway" button click
+         */
+        _handleOverlapSaveAnyway: function() {
+            this.state.overlapConfirmed = true;
+            this._hideOverlapPanel();
+            this._clearOverlapDisplay();
+            this._showToast('Saving boundary with overlaps', 'warning');
+
+            // Save to hidden field
+            this._saveToHiddenField();
+        },
+
+        /**
+         * Hide overlap panel
+         */
+        _hideOverlapPanel: function() {
+            if (this.overlapPanel) {
+                this.overlapPanel.style.display = 'none';
+                this.overlapPanel.innerHTML = '';
+            }
+        },
+
+        /**
+         * Clear overlap display from map
+         */
+        _clearOverlapDisplay: function() {
+            if (this.overlapLayer) {
+                this.overlapLayer.clearLayers();
+            }
+            if (this.overlapHighlightLayer) {
+                this.overlapHighlightLayer.clearLayers();
+            }
+        },
+
+        /**
+         * Reset overlap state
+         */
+        _resetOverlapState: function() {
+            this.state.overlaps = [];
+            this.state.overlapChecked = false;
+            this.state.overlapConfirmed = false;
+            this.state.overlapCheckPending = false;
+            this._clearOverlapDisplay();
+            this._hideOverlapPanel();
+        },
+
+        // =============================================
+        // END OVERLAP CHECKING METHODS
+        // =============================================
+
+        /**
+         * Save to hidden field
+         */
+        _saveToHiddenField: function() {
+            var hiddenField = document.getElementById(this.options.hiddenFieldId);
+            if (hiddenField) {
+                hiddenField.value = JSON.stringify(this._toGeoJSON());
+            }
+
+            // Update output fields
+            var outputFields = this.options.outputFields;
+            var metrics = this.state.metrics;
+
+            if (metrics) {
+                if (outputFields.areaFieldId) {
+                    var areaField = document.querySelector('[name="' + outputFields.areaFieldId + '"]');
+                    if (areaField) areaField.value = metrics.areaHectares.toFixed(4);
+                }
+                if (outputFields.perimeterFieldId) {
+                    var perimField = document.querySelector('[name="' + outputFields.perimeterFieldId + '"]');
+                    if (perimField) perimField.value = metrics.perimeterMeters.toFixed(2);
+                }
+                if (outputFields.centroidFieldId) {
+                    var centField = document.querySelector('[name="' + outputFields.centroidFieldId + '"]');
+                    if (centField) {
+                        centField.value = JSON.stringify({
+                            type: 'Point',
+                            coordinates: [metrics.centroid.lng, metrics.centroid.lat]
+                        });
+                    }
+                }
+                if (outputFields.vertexCountFieldId) {
+                    var countField = document.querySelector('[name="' + outputFields.vertexCountFieldId + '"]');
+                    if (countField) countField.value = metrics.vertexCount;
+                }
+            }
+        },
+
+        /**
+         * Load existing value from hidden field
+         */
+        _loadExistingValue: function() {
+            var hiddenField = document.getElementById(this.options.hiddenFieldId);
+            if (!hiddenField || !hiddenField.value) return;
+
+            try {
+                var geojson = JSON.parse(hiddenField.value);
+                var coords = null;
+
+                if (geojson.type === 'Polygon') {
+                    coords = geojson.coordinates[0];
+                } else if (geojson.type === 'Feature' && geojson.geometry.type === 'Polygon') {
+                    coords = geojson.geometry.coordinates[0];
+                }
+
+                if (coords && coords.length > 0) {
+                    // Remove closing point if present
+                    var vertices = coords.slice(0, -1);
+                    var self = this;
+                    vertices.forEach(function(coord) {
+                        self.state.vertices.push({ lat: coord[1], lng: coord[0] });
+                    });
+
+                    // Rebuild display
+                    this.state.vertices.forEach(function(v, i) {
+                        self._addVertexMarker(v, i);
+                    });
+                    this._updatePolygon();
+                    this._calculateMetrics();
+                    this._updateInfoPanel();
+                }
+            } catch (e) {
+                console.warn('[GISCapture] Failed to load existing value:', e);
+            }
+        },
+
+        /**
+         * Convert to GeoJSON
+         */
+        _toGeoJSON: function() {
+            if (this.state.vertices.length < 3) return null;
+
+            var coords = this.state.vertices.map(function(v) {
+                return [v.lng, v.lat]; // GeoJSON is [lng, lat]
+            });
+            coords.push(coords[0]); // Close the ring
+
+            return {
+                type: 'Polygon',
+                coordinates: [coords]
+            };
+        },
+
+        /**
+         * Undo last vertex
+         */
+        _undoLastVertex: function() {
+            if (this.state.vertices.length === 0) return;
+
+            this.state.vertices.pop();
+
+            var marker = this.vertexMarkers.pop();
+            if (marker) {
+                this.drawingLayer.removeLayer(marker);
+            }
+
+            this._updatePolygon();
+            this._calculateMetrics();
+            this._updateInfoPanel();
+
+            this._showToast('Corner removed', 'info');
+        },
+
+        /**
+         * Clear all drawing
+         */
+        _clearDrawing: function() {
+            this.state.vertices = [];
+            this.state.metrics = null;
+            this.state.selectedVertexIndex = null;
+
+            // Clear markers
+            this.vertexMarkers.forEach(function(m) {
+                this.drawingLayer.removeLayer(m);
+            }, this);
+            this.vertexMarkers = [];
+
+            // Clear midpoint markers
+            this._clearMidpointMarkers();
+
+            // Clear intersection highlights
+            this._clearIntersectionHighlights();
+
+            // Clear overlap state and display
+            this._resetOverlapState();
+
+            // Clear polygon
+            if (this.state.polygon) {
+                this.drawingLayer.removeLayer(this.state.polygon);
+                this.state.polygon = null;
+            }
+
+            // Clear ghost line
+            if (this.ghostLine) {
+                this.drawingLayer.removeLayer(this.ghostLine);
+                this.ghostLine = null;
+            }
+
+            // Hide close hint
+            this._hideCloseHint();
+
+            // Clear hidden field
+            var hiddenField = document.getElementById(this.options.hiddenFieldId);
+            if (hiddenField) {
+                hiddenField.value = '';
+            }
+
+            this._updateInfoPanel();
+            this.validationPanel.style.display = 'none';
+            this._clearAllWarnings();
+
+            this._showToast('Drawing cleared', 'info');
+        },
+
+        /**
+         * Start vertex drag
+         */
+        _startVertexDrag: function(index, e) {
+            var self = this;
+            var map = this.map;
+            var marker = this.vertexMarkers[index];
+
+            map.dragging.disable();
+
+            function onMove(ev) {
+                marker.setLatLng(ev.latlng);
+                self.state.vertices[index] = { lat: ev.latlng.lat, lng: ev.latlng.lng };
+                self._updatePolygon();
+                self._calculateMetrics();
+            }
+
+            function onUp() {
+                map.off('mousemove', onMove);
+                map.off('mouseup', onUp);
+                map.dragging.enable();
+                self._updateInfoPanel();
+                self._checkSelfIntersection();
+                self._checkAreaWarnings();
+                self._saveToHiddenField();
+
+                // Re-check overlaps after vertex modification in preview mode
+                if (self.state.phase === 'PREVIEW') {
+                    self._checkOverlaps();
+                }
+            }
+
+            map.on('mousemove', onMove);
+            map.on('mouseup', onUp);
+        },
+
+        /**
+         * Calculate distance between two points (Haversine)
+         */
+        _distanceBetween: function(lat1, lng1, lat2, lng2) {
+            var R = 6371000; // Earth's radius in meters
+            var dLat = this._toRad(lat2 - lat1);
+            var dLng = this._toRad(lng2 - lng1);
+            var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(this._toRad(lat1)) * Math.cos(this._toRad(lat2)) *
+                    Math.sin(dLng/2) * Math.sin(dLng/2);
+            var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        },
+
+        _toRad: function(deg) {
+            return deg * Math.PI / 180;
+        },
+
+        /**
+         * Show toast notification
+         */
+        _showToast: function(message, type) {
+            var existing = this.wrapper.querySelector('.gis-toast-container');
+            if (existing) existing.remove();
+
+            var container = document.createElement('div');
+            container.className = 'gis-toast-container';
+
+            var toast = document.createElement('div');
+            toast.className = 'gis-toast ' + (type || 'info');
+            toast.textContent = message;
+
+            container.appendChild(toast);
+            this.wrapper.appendChild(container);
+
+            setTimeout(function() {
+                container.remove();
+            }, 3000);
+        },
+
+        /**
+         * Get current geometry as GeoJSON
+         */
+        getGeometry: function() {
+            return this._toGeoJSON();
+        },
+
+        /**
+         * Get metrics
+         */
+        getMetrics: function() {
+            return this.state.metrics;
+        },
+
+        /**
+         * Destroy instance
+         */
+        destroy: function() {
+            if (this.state.gpsWatchId) {
+                navigator.geolocation.clearWatch(this.state.gpsWatchId);
+            }
+            // Clean up event handlers
+            if (this._boundMouseMoveHandler) {
+                this.map.off('mousemove', this._boundMouseMoveHandler);
+            }
+            if (this._boundDblClickHandler) {
+                this.map.off('dblclick', this._boundDblClickHandler);
+            }
+            if (this._boundKeyDownHandler) {
+                document.removeEventListener('keydown', this._boundKeyDownHandler);
+            }
+            if (this._boundGlobalKeyHandler) {
+                document.removeEventListener('keydown', this._boundGlobalKeyHandler);
+            }
+            if (this.closeHintTooltip) {
+                this.map.removeLayer(this.closeHintTooltip);
+            }
+            // Clear midpoint and intersection markers
+            this._clearMidpointMarkers();
+            this._clearIntersectionHighlights();
+            // Clear overlap display
+            this._clearOverlapDisplay();
+            if (this.map) {
+                this.map.remove();
+            }
+            this.container.innerHTML = '';
+        }
+    };
+
+    // Public API
+    return {
+        init: init
+    };
+
+})();
