@@ -92,6 +92,8 @@ var GISCapture = (function() {
             overlap: null,
             // Nearby parcels configuration (READ-ONLY display)
             nearbyParcels: null,
+            // Auto-center configuration
+            autoCenter: null,
             onGeometryChange: null,
             onValidationError: null,
             onError: null
@@ -120,7 +122,14 @@ var GISCapture = (function() {
             nearbyParcelsLoaded: false,
             nearbyParcelsLoading: false,
             nearbyParcelsVisible: false,
-            nearbyParcelsData: []        // Cached parcel data
+            nearbyParcelsData: [],       // Cached parcel data
+            // Auto-center state
+            autoCenterAttempted: false,
+            autoCenterLastValues: null,   // { district, village, lat, lon }
+            autoCenterInProgress: false,
+            // Initial geometry for self-overlap detection
+            initialGeometry: null,        // Stores the originally loaded GeoJSON for edit mode
+            initialAreaHectares: null     // Stores the initial area for self-overlap detection
         };
 
         // Map references
@@ -146,6 +155,10 @@ var GISCapture = (function() {
         this.nearbyParcelsBadge = null;    // Count badge element
         this.nearbyParcelsLegend = null;   // Legend element
 
+        // Auto-center references
+        this.autoCenterInterval = null;    // Polling interval for field changes
+        this.autoCenterStatusEl = null;    // Status indicator element
+
         // Accessibility
         this.liveRegion = null;        // ARIA live region for announcements
         this.searchInput = null;       // Location search input
@@ -164,6 +177,24 @@ var GISCapture = (function() {
         _init: function() {
             var self = this;
 
+            // Debug: log recordId received from server
+            console.log('[GIS] RecordId from server: "' + (this.options.recordId || '') + '"');
+
+            // Fallback: extract recordId from URL if not provided by server
+            // This handles cases where the Java-side extraction failed due to malformed URLs
+            if (!this.options.recordId) {
+                console.log('[GIS] RecordId empty, attempting URL extraction...');
+                console.log('[GIS] URL search string: ' + window.location.search);
+                // Allow 8-16 hex chars in last segment to handle standard (12) and non-standard UUIDs
+                var urlMatch = window.location.search.match(/[?&]id=([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{8,16})/i);
+                if (urlMatch) {
+                    this.options.recordId = urlMatch[1];
+                    console.log('[GIS] RecordId extracted from URL: ' + this.options.recordId);
+                } else {
+                    console.log('[GIS] No UUID found in URL');
+                }
+            }
+
             // Build HTML structure
             this._buildUI();
 
@@ -177,6 +208,11 @@ var GISCapture = (function() {
             } else {
                 // Show empty state first
                 this._showEmptyState();
+            }
+
+            // Initialize auto-center if enabled
+            if (this._isAutoCenterEnabled()) {
+                this._initAutoCenter();
             }
         },
 
@@ -513,17 +549,21 @@ var GISCapture = (function() {
             // Build API URL
             var apiUrl = this.options.apiBase + '/geocode?query=' + encodeURIComponent(query) + '&limit=5';
 
-            // Add headers
-            var headers = {};
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping search');
+                this._showSearchError();
+                return;
             }
+
+            // Build headers (session-based auth)
+            var headers = this._buildApiHeaders();
 
             // Show loading state
             this._showSearchLoading();
 
-            fetch(apiUrl, {
+            fetch(validatedUrl, {
                 method: 'GET',
                 headers: headers
             })
@@ -1903,10 +1943,21 @@ var GISCapture = (function() {
                 return;
             }
 
+            // Build warning element using DOM methods to prevent XSS
             var warningDiv = document.createElement('div');
-            warningDiv.className = 'gis-warning-item ' + type;
+            warningDiv.className = 'gis-warning-item ' + this._escapeHtml(type);
             warningDiv.setAttribute('data-warning-type', type);
-            warningDiv.innerHTML = '<span class="gis-warning-icon">⚠</span><span class="gis-warning-text">' + message + '</span>';
+
+            var iconSpan = document.createElement('span');
+            iconSpan.className = 'gis-warning-icon';
+            iconSpan.textContent = '⚠';
+
+            var textSpan = document.createElement('span');
+            textSpan.className = 'gis-warning-text';
+            textSpan.textContent = message; // textContent is XSS-safe
+
+            warningDiv.appendChild(iconSpan);
+            warningDiv.appendChild(textSpan);
 
             this.warningPanel.appendChild(warningDiv);
             this.warningPanel.style.display = 'block';
@@ -2434,6 +2485,9 @@ var GISCapture = (function() {
             // Exclude current record from overlap check when editing (Phase 4)
             if (self.options.recordId) {
                 targetConfig.excludeRecordId = self.options.recordId;
+                console.log('[GIS] Overlap check - excluding recordId: ' + self.options.recordId);
+            } else {
+                console.log('[GIS] Overlap check - NO recordId to exclude (will match all records)');
             }
 
             var requestBody = {
@@ -2447,17 +2501,20 @@ var GISCapture = (function() {
                 }
             };
 
-            // Build headers with API authentication
-            var headers = {
-                'Content-Type': 'application/json'
-            };
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping overlap check');
+                self.state.overlapCheckPending = false;
+                self._hideOverlapPanel();
+                return;
             }
 
+            // Build headers (session-based auth, no explicit credentials)
+            var headers = this._buildApiHeaders();
+
             // Make API call
-            fetch(apiUrl, {
+            fetch(validatedUrl, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(requestBody)
@@ -2500,9 +2557,66 @@ var GISCapture = (function() {
                         };
                     });
 
-                    self.state.overlaps = overlaps;
-                    self._displayOverlaps(overlaps);
-                    self._showOverlapWarning(overlaps);
+                    // Client-side self-overlap filter (Phase 4 enhancement)
+                    // When editing an existing record and the polygon was SHRUNK, the new polygon
+                    // will be entirely inside the original (stored in DB), causing 100% overlap.
+                    // We detect this by checking: edit mode + high overlap% + polygon was shrunk
+                    var isEditMode = self.options.recordId || self.state.initialGeometry;
+                    var initialArea = self.state.initialAreaHectares;
+                    var currentArea = self.state.metrics ? self.state.metrics.areaHectares : null;
+
+                    console.log('[GIS] Self-overlap filter check:');
+                    console.log('[GIS]   isEditMode=' + !!isEditMode + ' (recordId=' + (self.options.recordId || 'none') + ')');
+                    console.log('[GIS]   initialArea=' + (initialArea ? initialArea.toFixed(4) + ' ha' : 'not set'));
+                    console.log('[GIS]   currentArea=' + (currentArea ? currentArea.toFixed(4) + ' ha' : 'not set'));
+
+                    if (isEditMode && currentArea) {
+                        var originalOverlapCount = overlaps.length;
+
+                        overlaps = overlaps.filter(function(overlap) {
+                            console.log('[GIS] Checking overlap: id=' + overlap.id +
+                                ', percentage=' + overlap.overlapPercentage.toFixed(1) +
+                                '%, overlapArea=' + overlap.overlapArea.toFixed(4) + ' ha');
+
+                            // Strategy 1: If polygon was SHRUNK and overlap is ~100%
+                            // The new smaller polygon fits entirely inside the original
+                            if (overlap.overlapPercentage >= 95.0 && initialArea && initialArea > currentArea) {
+                                console.log('[GIS] Polygon was shrunk (initial=' + initialArea.toFixed(4) +
+                                    ' > current=' + currentArea.toFixed(4) + ') and overlap is ' +
+                                    overlap.overlapPercentage.toFixed(1) + '% - filtering as self-overlap');
+                                return false;
+                            }
+
+                            // Strategy 2: If overlap area ≈ current area (same polygon, not shrunk)
+                            if (overlap.overlapPercentage >= 99.0) {
+                                var areaDiff = Math.abs(overlap.overlapArea - currentArea);
+                                var areaThreshold = currentArea * 0.02; // 2% tolerance
+                                if (areaDiff <= areaThreshold) {
+                                    console.log('[GIS] Overlap area ≈ current area - filtering as self-overlap');
+                                    return false;
+                                }
+                            }
+
+                            return true; // Keep this overlap
+                        });
+
+                        if (overlaps.length < originalOverlapCount) {
+                            console.log('[GIS] Self-overlap filter removed ' +
+                                (originalOverlapCount - overlaps.length) + ' overlap(s)');
+                        }
+                    } else {
+                        console.log('[GIS] Self-overlap filter skipped: ' +
+                            (!isEditMode ? 'not in edit mode' : 'no current metrics'));
+                    }
+
+                    // Check if we still have overlaps after filtering
+                    if (overlaps.length > 0) {
+                        self.state.overlaps = overlaps;
+                        self._displayOverlaps(overlaps);
+                        self._showOverlapWarning(overlaps);
+                    } else {
+                        self._hideOverlapPanel();
+                    }
                 } else {
                     self._hideOverlapPanel();
                 }
@@ -2577,22 +2691,27 @@ var GISCapture = (function() {
          * Build popup content for overlapping record
          */
         _buildOverlapPopupContent: function(record) {
+            var self = this;
             var html = '<div class="gis-overlap-popup">';
             html += '<strong>Existing Record</strong><br>';
 
-            // Display configured fields
+            // Display configured fields (escape values to prevent XSS)
             if (record.displayValues) {
                 Object.keys(record.displayValues).forEach(function(key) {
-                    html += '<span>' + key + ': ' + record.displayValues[key] + '</span><br>';
+                    var escapedKey = self._escapeHtml(String(key));
+                    var escapedValue = self._escapeHtml(String(record.displayValues[key] || ''));
+                    html += '<span>' + escapedKey + ': ' + escapedValue + '</span><br>';
                 });
             }
 
-            // Show overlap info
+            // Show overlap info (numeric values are safe)
             if (record.overlapArea !== undefined) {
+                var area = Number(record.overlapArea);
                 html += '<br><span class="gis-overlap-info">Overlap: ' +
-                    record.overlapArea.toFixed(4) + ' ha';
+                    (isNaN(area) ? '0' : area.toFixed(4)) + ' ha';
                 if (record.overlapPercentage !== undefined) {
-                    html += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                    var pct = Number(record.overlapPercentage);
+                    html += ' (' + (isNaN(pct) ? '0' : pct.toFixed(1)) + '%)';
                 }
                 html += '</span>';
             }
@@ -2630,24 +2749,28 @@ var GISCapture = (function() {
                 }
             });
 
-            // Build record list HTML
+            // Build record list HTML (escape all user-provided values to prevent XSS)
             var recordsHtml = '';
             overlaps.forEach(function(record, index) {
                 var displayText = '';
                 if (record.displayValues) {
-                    var values = Object.values(record.displayValues);
+                    var values = Object.values(record.displayValues).map(function(v) {
+                        return self._escapeHtml(String(v || ''));
+                    });
                     displayText = values.join(' - ');
                 } else if (record.id) {
-                    displayText = 'Record ' + record.id;
+                    displayText = 'Record ' + self._escapeHtml(String(record.id));
                 } else {
                     displayText = 'Record ' + (index + 1);
                 }
 
                 var overlapInfo = '';
                 if (record.overlapArea !== undefined) {
-                    overlapInfo = record.overlapArea.toFixed(4) + ' ha';
+                    var area = Number(record.overlapArea);
+                    overlapInfo = (isNaN(area) ? '0' : area.toFixed(4)) + ' ha';
                     if (record.overlapPercentage !== undefined) {
-                        overlapInfo += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                        var pct = Number(record.overlapPercentage);
+                        overlapInfo += ' (' + (isNaN(pct) ? '0' : pct.toFixed(1)) + '%)';
                     }
                 }
 
@@ -2788,10 +2911,8 @@ var GISCapture = (function() {
             this.nearbyParcelsLayer = L.layerGroup();
             this.nearbyParcelsLayer.addTo(this.map);
 
-            // Ensure nearby parcels layer is behind drawing layer
-            if (this.drawingLayer) {
-                this.drawingLayer.bringToFront();
-            }
+            // Note: Layer order is determined by add order to map
+            // Drawing layer is added after nearby parcels, so it's already on top
 
             // Add legend
             this._addNearbyParcelsLegend();
@@ -2931,19 +3052,20 @@ var GISCapture = (function() {
                 }
             }
 
-            // Build headers
-            var headers = {
-                'Content-Type': 'application/json'
-            };
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping nearby parcels fetch');
+                return;
             }
+
+            // Build headers (session-based auth)
+            var headers = this._buildApiHeaders();
 
             this.state.nearbyParcelsLoading = true;
             this._showNearbyParcelsLoading();
 
-            fetch(apiUrl, {
+            fetch(validatedUrl, {
                 method: 'GET',
                 headers: headers
             })
@@ -3072,10 +3194,7 @@ var GISCapture = (function() {
                 }
             });
 
-            // Ensure drawing layer stays on top
-            if (this.drawingLayer) {
-                this.drawingLayer.bringToFront();
-            }
+            // Note: Drawing layer stays on top due to map add order
         },
 
         /**
@@ -3132,6 +3251,46 @@ var GISCapture = (function() {
             var div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        },
+
+        /**
+         * Validate API URL for security.
+         * Allows relative paths (starting with /) or HTTPS URLs.
+         * Returns the URL if valid, or null if invalid.
+         */
+        _validateApiUrl: function(url) {
+            if (!url) return null;
+
+            // Allow relative paths (most common and secure)
+            if (url.startsWith('/')) {
+                return url;
+            }
+
+            // Allow HTTPS URLs
+            if (url.startsWith('https://')) {
+                return url;
+            }
+
+            // Warn about HTTP URLs but allow them for development
+            if (url.startsWith('http://')) {
+                console.warn('[GIS] Warning: API URL uses insecure HTTP protocol. Consider using HTTPS.');
+                // In production, you might want to return null here to block HTTP
+                return url;
+            }
+
+            console.error('[GIS] Invalid API URL format. Must be relative path or HTTPS URL.');
+            return null;
+        },
+
+        /**
+         * Build request headers for API calls.
+         * Uses session-based authentication (no explicit credentials passed).
+         */
+        _buildApiHeaders: function() {
+            return {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
         },
 
         /**
@@ -3254,17 +3413,40 @@ var GISCapture = (function() {
          * Load existing value from hidden field
          */
         _loadExistingValue: function() {
+            console.log('[GIS] _loadExistingValue called, hiddenFieldId=' + this.options.hiddenFieldId);
             var hiddenField = document.getElementById(this.options.hiddenFieldId);
-            if (!hiddenField || !hiddenField.value) return;
+            console.log('[GIS] Hidden field found=' + !!hiddenField + ', value length=' + (hiddenField ? (hiddenField.value || '').length : 0));
+
+            if (!hiddenField || !hiddenField.value) {
+                console.log('[GIS] No hidden field or empty value - skipping initial geometry load');
+                return;
+            }
+
+            console.log('[GIS] Hidden field value (first 200 chars): ' + hiddenField.value.substring(0, 200));
 
             try {
                 var geojson = JSON.parse(hiddenField.value);
                 var coords = null;
 
+                // Store initial geometry for self-overlap detection in edit mode
+                // Normalize to Polygon type for consistent comparison
                 if (geojson.type === 'Polygon') {
+                    this.state.initialGeometry = geojson;
                     coords = geojson.coordinates[0];
                 } else if (geojson.type === 'Feature' && geojson.geometry.type === 'Polygon') {
+                    this.state.initialGeometry = geojson.geometry;
                     coords = geojson.geometry.coordinates[0];
+                }
+
+                if (this.state.initialGeometry) {
+                    // Calculate and store initial area using Turf.js
+                    try {
+                        var initialArea = turf.area(this.state.initialGeometry) / 10000; // m² to hectares
+                        this.state.initialAreaHectares = initialArea;
+                        console.log('[GIS] Stored initial geometry for self-overlap detection, area=' + initialArea.toFixed(4) + ' ha');
+                    } catch (e) {
+                        console.warn('[GIS] Could not calculate initial area:', e);
+                    }
                 }
 
                 if (coords && coords.length > 0) {
@@ -3466,12 +3648,271 @@ var GISCapture = (function() {
             return this.state.metrics;
         },
 
+        // =============================================
+        // AUTO-CENTER METHODS
+        // =============================================
+
+        /**
+         * Check if auto-center is enabled
+         */
+        _isAutoCenterEnabled: function() {
+            return this.options.autoCenter && this.options.autoCenter.enabled === true;
+        },
+
+        /**
+         * Initialize auto-center feature
+         */
+        _initAutoCenter: function() {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            if (!config) return;
+
+            // Delay initial auto-center attempt to ensure fields are populated
+            setTimeout(function() {
+                self._attemptAutoCenter();
+            }, 300);
+
+            // Set up field change monitoring if enabled
+            if (config.retryOnFieldChange) {
+                this._setupAutoCenterFieldMonitoring();
+            }
+        },
+
+        /**
+         * Set up polling to monitor field changes
+         */
+        _setupAutoCenterFieldMonitoring: function() {
+            var self = this;
+
+            // Poll for field changes every 1 second
+            this.autoCenterInterval = setInterval(function() {
+                if (self.state.autoCenterInProgress) return;
+
+                var currentValues = self._getAutoCenterFieldValues();
+                var lastValues = self.state.autoCenterLastValues;
+
+                // Check if values have changed
+                if (lastValues && (
+                    currentValues.district !== lastValues.district ||
+                    currentValues.village !== lastValues.village ||
+                    currentValues.lat !== lastValues.lat ||
+                    currentValues.lon !== lastValues.lon
+                )) {
+                    // Values changed, attempt re-center
+                    self._attemptAutoCenter();
+                }
+            }, 1000);
+        },
+
+        /**
+         * Get current values from auto-center fields
+         */
+        _getAutoCenterFieldValues: function() {
+            var config = this.options.autoCenter;
+            var values = {
+                district: '',
+                village: '',
+                lat: '',
+                lon: ''
+            };
+
+            if (!config) return values;
+
+            // Helper to get field value from Joget form
+            var getFieldValue = function(fieldId) {
+                if (!fieldId) return '';
+
+                // Try multiple selectors (Joget forms can have different field structures)
+                var selectors = [
+                    '[name="' + fieldId + '"]',
+                    '[name="' + fieldId + '_name"]',          // For select lists with display names
+                    '#' + fieldId,
+                    'input[id$="_' + fieldId + '"]',
+                    'select[id$="_' + fieldId + '"]',
+                    'textarea[id$="_' + fieldId + '"]'
+                ];
+
+                for (var i = 0; i < selectors.length; i++) {
+                    var el = document.querySelector(selectors[i]);
+                    if (el) {
+                        // Handle select elements
+                        if (el.tagName === 'SELECT') {
+                            var selected = el.options[el.selectedIndex];
+                            return selected ? (selected.text || selected.value || '') : '';
+                        }
+                        return el.value || '';
+                    }
+                }
+                return '';
+            };
+
+            values.district = getFieldValue(config.districtFieldId);
+            values.village = getFieldValue(config.villageFieldId);
+            values.lat = getFieldValue(config.latFieldId);
+            values.lon = getFieldValue(config.lonFieldId);
+
+            return values;
+        },
+
+        /**
+         * Attempt auto-center using fallback chain
+         */
+        _attemptAutoCenter: function() {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            if (!config || this.state.autoCenterInProgress) return;
+
+            var values = this._getAutoCenterFieldValues();
+            this.state.autoCenterLastValues = values;
+
+            // Fallback 1: Check for pre-computed coordinates
+            var lat = parseFloat(values.lat);
+            var lon = parseFloat(values.lon);
+
+            if (!isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0) {
+                this._performAutoCenter(lat, lon, 'Using pre-computed coordinates');
+                return;
+            }
+
+            // Fallback 2: Geocode district/village
+            if (values.district || values.village) {
+                this._geocodeForAutoCenter(values.village, values.district);
+                return;
+            }
+
+            // Fallback 3: Use default coordinates (only on first attempt)
+            if (!this.state.autoCenterAttempted) {
+                this.state.autoCenterAttempted = true;
+                // Don't center to defaults - let the plugin's default lat/lon handle initial view
+            }
+        },
+
+        /**
+         * Geocode location for auto-center
+         */
+        _geocodeForAutoCenter: function(village, district) {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            // Build query
+            var parts = [];
+            if (village) parts.push(village);
+            if (district) parts.push(district);
+            if (config.countrySuffix) parts.push(config.countrySuffix);
+            var query = parts.join(', ');
+
+            if (!query) {
+                this._autoCenterToDefaults();
+                return;
+            }
+
+            this.state.autoCenterInProgress = true;
+            this._showAutoCenterStatus('Locating ' + (village || district) + '...');
+
+            // Use Nominatim geocoding (same as existing search feature)
+            var url = 'https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query) + '&limit=1';
+
+            fetch(url, {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            })
+            .then(function(response) {
+                if (!response.ok) throw new Error('Geocode request failed');
+                return response.json();
+            })
+            .then(function(results) {
+                self.state.autoCenterInProgress = false;
+                self._hideAutoCenterStatus();
+
+                if (results && results.length > 0) {
+                    var lat = parseFloat(results[0].lat);
+                    var lon = parseFloat(results[0].lon);
+                    self._performAutoCenter(lat, lon, 'Map centered on ' + (village || district));
+                    self.state.autoCenterAttempted = true;
+                } else {
+                    self._autoCenterToDefaults();
+                }
+            })
+            .catch(function(error) {
+                console.warn('[GISCapture] Auto-center geocode failed:', error);
+                self.state.autoCenterInProgress = false;
+                self._hideAutoCenterStatus();
+                self._autoCenterToDefaults();
+            });
+        },
+
+        /**
+         * Perform the actual map centering
+         */
+        _performAutoCenter: function(lat, lon, message) {
+            var config = this.options.autoCenter;
+            var zoom = config && config.zoom ? config.zoom : 14;
+
+            this.map.setView([lat, lon], zoom);
+
+            if (message) {
+                this._showToast(message, 'success');
+                this._announce(message);
+            }
+        },
+
+        /**
+         * Fall back to default coordinates
+         */
+        _autoCenterToDefaults: function() {
+            if (!this.state.autoCenterAttempted) {
+                this.state.autoCenterAttempted = true;
+                // Show warning toast only if we tried to geocode something
+                this._showToast('Location not found, using default view', 'warning');
+                this._announce('Location not found, using default map view');
+            }
+            // Let the default lat/lon from plugin config handle the view
+        },
+
+        /**
+         * Show auto-center status indicator
+         */
+        _showAutoCenterStatus: function(message) {
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.textContent = message;
+                return;
+            }
+
+            var status = document.createElement('div');
+            status.className = 'gis-autocenter-status';
+            status.innerHTML = '<span class="gis-autocenter-spinner"></span><span class="gis-autocenter-text">' + message + '</span>';
+            this.wrapper.appendChild(status);
+            this.autoCenterStatusEl = status;
+        },
+
+        /**
+         * Hide auto-center status indicator
+         */
+        _hideAutoCenterStatus: function() {
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.remove();
+                this.autoCenterStatusEl = null;
+            }
+        },
+
         /**
          * Destroy instance
          */
         destroy: function() {
             if (this.state.gpsWatchId) {
                 navigator.geolocation.clearWatch(this.state.gpsWatchId);
+            }
+            // Clean up auto-center polling
+            if (this.autoCenterInterval) {
+                clearInterval(this.autoCenterInterval);
+                this.autoCenterInterval = null;
+            }
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.remove();
+                this.autoCenterStatusEl = null;
             }
             // Clean up event handlers
             if (this._boundMouseMoveHandler) {

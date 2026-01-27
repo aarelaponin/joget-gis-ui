@@ -15,7 +15,7 @@
 </div>
 
 <#-- Cache bust version -->
-<#assign gisCacheVersion = "20260106_v13">
+<#assign gisCacheVersion = "20260127_v16">
 
 <#-- Load Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
@@ -86,12 +86,20 @@
     /**
      * Initialize the map component
      */
+    var initMapRetryCount = 0;
+    var MAX_INIT_RETRIES = 50; // Max 5 seconds of retries (50 * 100ms)
+
     function initMap() {
         log('initMap called');
 
         var container = document.getElementById('${elementId!}');
         if (!container) {
-            log('Container not found, retrying in 100ms...');
+            initMapRetryCount++;
+            if (initMapRetryCount > MAX_INIT_RETRIES) {
+                console.error('[GIS] Container not found after ' + MAX_INIT_RETRIES + ' retries, giving up.');
+                return;
+            }
+            log('Container not found, retrying in 100ms... (attempt ' + initMapRetryCount + ')');
             setTimeout(initMap, 100);
             return;
         }
@@ -114,11 +122,16 @@
 
         try {
             var config = ${config!'{}'};
-            
+
+            // Validate API base URL for security (must be relative path or HTTPS)
+            var apiBase = '${apiBase!}';
+            if (apiBase && !apiBase.startsWith('/') && !apiBase.startsWith('https://')) {
+                console.warn('[GIS] API base URL should use HTTPS or be a relative path');
+            }
+
             var capture = GISCapture.init('${elementId!}', {
-                apiBase: '${apiBase!}',
-                apiId: '${apiId!}',
-                apiKey: '${apiKey!}',
+                apiBase: apiBase,
+                // NOTE: API credentials are handled server-side for security
                 hiddenFieldId: '${fieldId!}',
                 recordId: '${recordId!}',
                 outputFields: {
@@ -139,6 +152,8 @@
                 gps: config.gps || {},
                 style: config.style || {},
                 overlap: config.overlap || null,
+                nearbyParcels: config.nearbyParcels || null,
+                autoCenter: config.autoCenter || null,
                 onGeometryChange: function(geojson, metrics) {
                     log('Geometry changed: ' + (metrics ? metrics.areaHectares + ' ha' : 'cleared'));
                 },
