@@ -40,9 +40,9 @@
     }
 
     /**
-     * Load a script by URL
+     * Load a script by URL with optional fallback
      */
-    function loadScript(src, callback) {
+    function loadScript(src, callback, fallbackSrc) {
         var filename = src;
         var fileParam = src.match(/[?&]file=([^&]+)/);
         if (fileParam) {
@@ -54,6 +54,13 @@
         // Check if Leaflet is already loaded
         if (filename === 'leaflet.js' && typeof L !== 'undefined') {
             log('Leaflet already loaded');
+            callback();
+            return;
+        }
+
+        // Check if Turf is already loaded
+        if (src.indexOf('turf') !== -1 && typeof turf !== 'undefined') {
+            log('Turf.js already loaded');
             callback();
             return;
         }
@@ -77,7 +84,13 @@
 
         script.onerror = function(e) {
             console.error('[GIS] Failed to load script: ' + src, e);
-            callback();
+            // Try fallback CDN if available
+            if (fallbackSrc) {
+                log('Trying fallback CDN: ' + fallbackSrc);
+                loadScript(fallbackSrc, callback);
+            } else {
+                callback();
+            }
         };
 
         document.head.appendChild(script);
@@ -181,23 +194,46 @@
     log('Resource base: ' + resourceBase + ', version: ' + cacheVersion);
 
     // Load scripts in sequence: Leaflet -> Turf -> GIS Capture -> Init
-    loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', function() {
-        log('Leaflet loaded, typeof L = ' + typeof L);
+    // Each has a fallback CDN in case the primary CDN is unavailable
+    loadScript(
+        'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+        function() {
+            log('Leaflet loaded, typeof L = ' + typeof L);
 
-        loadScript('https://unpkg.com/@turf/turf@6/turf.min.js', function() {
-            log('Turf.js loaded, typeof turf = ' + typeof turf);
+            // Verify Leaflet loaded successfully
+            if (typeof L === 'undefined') {
+                console.error('[GIS] Leaflet failed to load from all CDNs');
+                return;
+            }
 
-            loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
-                log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+            loadScript(
+                'https://unpkg.com/@turf/turf@6/turf.min.js',
+                function() {
+                    log('Turf.js loaded, typeof turf = ' + typeof turf);
 
-                if (document.readyState === 'complete') {
-                    initMap();
-                } else {
-                    window.addEventListener('load', initMap);
-                }
-            });
-        });
-    });
+                    // Verify Turf loaded successfully
+                    if (typeof turf === 'undefined') {
+                        console.error('[GIS] Turf.js failed to load from all CDNs');
+                        return;
+                    }
+
+                    loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
+                        log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+
+                        if (document.readyState === 'complete') {
+                            initMap();
+                        } else {
+                            window.addEventListener('load', initMap);
+                        }
+                    });
+                },
+                // Fallback CDN for Turf.js
+                'https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js'
+            );
+        },
+        // Fallback CDN for Leaflet
+        'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js'
+    );
 
 })();
 </script>

@@ -164,6 +164,12 @@ var GISCapture = (function() {
         this.searchInput = null;       // Location search input
         this.searchResults = null;     // Search results dropdown
 
+        // Event listener cleanup tracking (for memory leak prevention)
+        this._eventListeners = [];     // Array of { element, event, handler }
+        this._abortControllers = new Map(); // Map of requestId -> AbortController
+        this._requestIdCounter = 0;    // Counter for generating unique request IDs
+        this._destroyed = false;       // Flag to prevent operations after destroy
+
         // Initialize
         this._init();
     }
@@ -2510,22 +2516,47 @@ var GISCapture = (function() {
                 return;
             }
 
+            // Cancel any previous overlap check request (race condition prevention)
+            if (this._overlapRequestId) {
+                this._abortRequest(this._overlapRequestId);
+            }
+
+            // Create new request ID and abort controller
+            var requestId = this._generateRequestId();
+            this._overlapRequestId = requestId;
+            var abortController = this._createAbortController(requestId);
+
             // Build headers (session-based auth, no explicit credentials)
             var headers = this._buildApiHeaders();
 
-            // Make API call
+            // Set up timeout (30 seconds)
+            var timeoutId = setTimeout(function() {
+                self._abortRequest(requestId);
+                console.warn('[GIS] Overlap check timed out after 30 seconds');
+            }, 30000);
+
+            // Make API call with abort signal
             fetch(validatedUrl, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(requestBody)
+                body: JSON.stringify(requestBody),
+                signal: abortController.signal
             })
             .then(function(response) {
+                clearTimeout(timeoutId);
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status + ': ' + response.statusText);
                 }
                 return response.json();
             })
             .then(function(response) {
+                // Ignore response if this is a stale request
+                if (requestId !== self._overlapRequestId) {
+                    console.log('[GIS] Ignoring stale overlap check response');
+                    return;
+                }
+
+                self._cleanupRequest(requestId);
                 self.state.overlapCheckPending = false;
                 self.state.overlapChecked = true;
 
@@ -2622,9 +2653,22 @@ var GISCapture = (function() {
                 }
             })
             .catch(function(error) {
+                clearTimeout(timeoutId);
+                self._cleanupRequest(requestId);
                 self.state.overlapCheckPending = false;
                 self._hideOverlapPanel();
-                // Don't block the user on API failure - just log the error
+
+                // Handle different error types
+                if (error.name === 'AbortError') {
+                    // Request was cancelled (timeout or newer request) - don't show error
+                    console.log('[GIS] Overlap check cancelled');
+                    return;
+                }
+
+                // Show user-visible error for actual failures
+                console.error('[GIS] Overlap check failed:', error.message);
+                self._showToast('Could not check for overlaps. Proceeding without check.', 'warning');
+
                 if (self.options.onError) {
                     self.options.onError('Overlap check failed: ' + error.message);
                 }
@@ -3059,23 +3103,48 @@ var GISCapture = (function() {
                 return;
             }
 
+            // Cancel any previous nearby parcels request (race condition prevention)
+            if (this._nearbyParcelsRequestId) {
+                this._abortRequest(this._nearbyParcelsRequestId);
+            }
+
+            // Create new request ID and abort controller
+            var requestId = this._generateRequestId();
+            this._nearbyParcelsRequestId = requestId;
+            var abortController = this._createAbortController(requestId);
+
             // Build headers (session-based auth)
             var headers = this._buildApiHeaders();
+
+            // Set up timeout (30 seconds)
+            var timeoutId = setTimeout(function() {
+                self._abortRequest(requestId);
+                console.warn('[GIS] Nearby parcels fetch timed out after 30 seconds');
+            }, 30000);
 
             this.state.nearbyParcelsLoading = true;
             this._showNearbyParcelsLoading();
 
             fetch(validatedUrl, {
                 method: 'GET',
-                headers: headers
+                headers: headers,
+                signal: abortController.signal
             })
             .then(function(response) {
+                clearTimeout(timeoutId);
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
                 return response.json();
             })
             .then(function(response) {
+                // Ignore response if this is a stale request
+                if (requestId !== self._nearbyParcelsRequestId) {
+                    console.log('[GIS] Ignoring stale nearby parcels response');
+                    return;
+                }
+
+                self._cleanupRequest(requestId);
                 self.state.nearbyParcelsLoading = false;
                 self._hideNearbyParcelsLoading();
 
@@ -3100,8 +3169,17 @@ var GISCapture = (function() {
                 self._updateNearbyParcelsCount(self.state.nearbyParcelsData.length, truncated);
             })
             .catch(function(error) {
+                clearTimeout(timeoutId);
+                self._cleanupRequest(requestId);
                 self.state.nearbyParcelsLoading = false;
                 self._hideNearbyParcelsLoading();
+
+                // Ignore abort errors (cancelled or timed out)
+                if (error.name === 'AbortError') {
+                    console.log('[GIS] Nearby parcels fetch cancelled');
+                    return;
+                }
+
                 console.warn('[GISCapture] Failed to load nearby parcels:', error);
             });
         },
@@ -3898,13 +3976,104 @@ var GISCapture = (function() {
             }
         },
 
+        // =============================================
+        // EVENT LISTENER & CLEANUP MANAGEMENT
+        // =============================================
+
         /**
-         * Destroy instance
+         * Add an event listener and track it for cleanup.
+         */
+        _addEventListener: function(element, event, handler, options) {
+            element.addEventListener(event, handler, options);
+            this._eventListeners.push({ element: element, event: event, handler: handler, options: options });
+        },
+
+        /**
+         * Remove all tracked event listeners.
+         */
+        _removeAllEventListeners: function() {
+            this._eventListeners.forEach(function(item) {
+                try {
+                    item.element.removeEventListener(item.event, item.handler, item.options);
+                } catch (e) {
+                    // Element may no longer exist
+                }
+            });
+            this._eventListeners = [];
+        },
+
+        /**
+         * Generate a unique request ID for tracking async operations.
+         */
+        _generateRequestId: function() {
+            return 'req_' + (++this._requestIdCounter) + '_' + Date.now();
+        },
+
+        /**
+         * Create an AbortController for a request and track it.
+         */
+        _createAbortController: function(requestId) {
+            var controller = new AbortController();
+            this._abortControllers.set(requestId, controller);
+            return controller;
+        },
+
+        /**
+         * Abort a specific request by ID.
+         */
+        _abortRequest: function(requestId) {
+            var controller = this._abortControllers.get(requestId);
+            if (controller) {
+                controller.abort();
+                this._abortControllers.delete(requestId);
+            }
+        },
+
+        /**
+         * Abort all pending requests.
+         */
+        _abortAllRequests: function() {
+            var self = this;
+            this._abortControllers.forEach(function(controller, requestId) {
+                try {
+                    controller.abort();
+                } catch (e) {
+                    // Ignore errors during abort
+                }
+            });
+            this._abortControllers.clear();
+        },
+
+        /**
+         * Clean up request tracking after completion.
+         */
+        _cleanupRequest: function(requestId) {
+            this._abortControllers.delete(requestId);
+        },
+
+        /**
+         * Check if the component has been destroyed.
+         */
+        _isDestroyed: function() {
+            return this._destroyed;
+        },
+
+        /**
+         * Destroy instance and clean up all resources.
          */
         destroy: function() {
+            if (this._destroyed) return;
+            this._destroyed = true;
+
+            // Abort all pending API requests
+            this._abortAllRequests();
+
+            // Clean up GPS watch
             if (this.state.gpsWatchId) {
                 navigator.geolocation.clearWatch(this.state.gpsWatchId);
+                this.state.gpsWatchId = null;
             }
+
             // Clean up auto-center polling
             if (this.autoCenterInterval) {
                 clearInterval(this.autoCenterInterval);
@@ -3914,11 +4083,15 @@ var GISCapture = (function() {
                 this.autoCenterStatusEl.remove();
                 this.autoCenterStatusEl = null;
             }
-            // Clean up event handlers
-            if (this._boundMouseMoveHandler) {
+
+            // Clean up tracked event listeners
+            this._removeAllEventListeners();
+
+            // Clean up legacy bound event handlers
+            if (this._boundMouseMoveHandler && this.map) {
                 this.map.off('mousemove', this._boundMouseMoveHandler);
             }
-            if (this._boundDblClickHandler) {
+            if (this._boundDblClickHandler && this.map) {
                 this.map.off('dblclick', this._boundDblClickHandler);
             }
             if (this._boundKeyDownHandler) {
@@ -3927,23 +4100,43 @@ var GISCapture = (function() {
             if (this._boundGlobalKeyHandler) {
                 document.removeEventListener('keydown', this._boundGlobalKeyHandler);
             }
-            if (this.closeHintTooltip) {
+            if (this.closeHintTooltip && this.map) {
                 this.map.removeLayer(this.closeHintTooltip);
             }
+
             // Clear midpoint and intersection markers
-            this._clearMidpointMarkers();
-            this._clearIntersectionHighlights();
+            if (typeof this._clearMidpointMarkers === 'function') {
+                this._clearMidpointMarkers();
+            }
+            if (typeof this._clearIntersectionHighlights === 'function') {
+                this._clearIntersectionHighlights();
+            }
+
             // Clear overlap display
-            this._clearOverlapDisplay();
+            if (typeof this._clearOverlapDisplay === 'function') {
+                this._clearOverlapDisplay();
+            }
+
             // Clear nearby parcels display
-            this._clearNearbyParcels();
-            if (this.nearbyParcelsLayer) {
+            if (typeof this._clearNearbyParcels === 'function') {
+                this._clearNearbyParcels();
+            }
+            if (this.nearbyParcelsLayer && this.map) {
                 this.map.removeLayer(this.nearbyParcelsLayer);
             }
+
+            // Destroy Leaflet map
             if (this.map) {
                 this.map.remove();
+                this.map = null;
             }
-            this.container.innerHTML = '';
+
+            // Clear container
+            if (this.container) {
+                this.container.innerHTML = '';
+            }
+
+            console.log('[GIS] Component destroyed');
         }
     };
 
