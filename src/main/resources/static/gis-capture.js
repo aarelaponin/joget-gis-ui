@@ -3884,13 +3884,13 @@ var GISCapture = (function() {
                 }
 
                 self._updateInfoPanel();
-                self._checkSelfIntersectionDebounced();
+                self._checkSelfIntersection();  // Immediate on drag end
                 self._checkAreaWarnings();
                 self._saveToHiddenField();
 
                 // Re-check overlaps after vertex modification in preview mode
                 if (self.state.phase === 'PREVIEW') {
-                    self._checkOverlapsDebounced();
+                    self._checkOverlaps();  // Immediate on drag end
                 }
             }
 
