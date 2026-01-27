@@ -2,14 +2,18 @@ package global.govstack.gisui.element;
 
 import org.joget.apps.app.service.AppUtil;
 import org.joget.apps.form.model.Element;
-import org.joget.apps.form.model.Form;
 import org.joget.apps.form.model.FormBuilderPaletteElement;
 import org.joget.apps.form.model.FormData;
 import org.joget.apps.form.service.FormUtil;
 import org.joget.commons.util.LogUtil;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * GIS Polygon Capture Form Element
@@ -28,6 +32,84 @@ import java.util.Map;
 public class GisPolygonCaptureElement extends Element implements FormBuilderPaletteElement {
 
     private static final String CLASS_NAME = GisPolygonCaptureElement.class.getName();
+
+    // Dangerous SQL patterns that should be rejected (security)
+    private static final Pattern DANGEROUS_SQL_PATTERN = Pattern.compile(
+        "(?i)(;|--|\\/\\*|\\*\\/|DROP|DELETE|INSERT|UPDATE|TRUNCATE|ALTER|CREATE|EXEC|EXECUTE|UNION|INTO|OUTFILE|DUMPFILE)",
+        Pattern.CASE_INSENSITIVE
+    );
+
+    /**
+     * Validate and sanitize a SQL filter condition.
+     * Returns the sanitized condition or empty string if dangerous patterns detected.
+     *
+     * @param filterCondition The filter condition to validate
+     * @return Sanitized filter condition or empty string if invalid
+     */
+    private String sanitizeFilterCondition(String filterCondition) {
+        if (filterCondition == null || filterCondition.trim().isEmpty()) {
+            return "";
+        }
+
+        String trimmed = filterCondition.trim();
+
+        // Check for dangerous SQL patterns
+        if (DANGEROUS_SQL_PATTERN.matcher(trimmed).find()) {
+            LogUtil.warn(CLASS_NAME, "Blocked potentially dangerous filter condition: " + trimmed);
+            return "";
+        }
+
+        return trimmed;
+    }
+
+    /**
+     * Get property value with a default fallback.
+     *
+     * @param value The property value (may be null or empty)
+     * @param defaultValue The default value to use if value is null/empty
+     * @return The value or default
+     */
+    private String getPropertyWithDefault(String value, String defaultValue) {
+        return (value == null || value.isEmpty()) ? defaultValue : value;
+    }
+
+    /**
+     * Safely parse a double value with a default fallback.
+     *
+     * @param value The string value to parse
+     * @param defaultValue The default value if parsing fails
+     * @return The parsed double or default
+     */
+    private double parseDoubleSafe(String value, double defaultValue) {
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            LogUtil.debug(CLASS_NAME, "Invalid double value '" + value + "', using default: " + defaultValue);
+            return defaultValue;
+        }
+    }
+
+    /**
+     * Safely parse an integer value with a default fallback.
+     *
+     * @param value The string value to parse
+     * @param defaultValue The default value if parsing fails
+     * @return The parsed integer or default
+     */
+    private int parseIntSafe(String value, int defaultValue) {
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            LogUtil.debug(CLASS_NAME, "Invalid integer value '" + value + "', using default: " + defaultValue);
+            return defaultValue;
+        }
+    }
 
     @Override
     public String getName() {
@@ -89,218 +171,165 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
     public String renderTemplate(FormData formData, Map dataModel) {
         String template = "GisPolygonCaptureElement.ftl";
 
-        // Get properties - Basic Settings
+        // =================================================================
+        // Phase 1: Extract basic properties
+        // =================================================================
         String fieldId = getPropertyString("id");
-        String label = getPropertyString("label");
-        
-        // Output Field Mapping
-        String areaFieldId = getPropertyString("areaFieldId");
-        String perimeterFieldId = getPropertyString("perimeterFieldId");
-        String centroidFieldId = getPropertyString("centroidFieldId");
-        String vertexCountFieldId = getPropertyString("vertexCountFieldId");
-
-        // Capture Mode Settings
-        String captureMode = getPropertyString("captureMode");
-        String defaultMode = getPropertyString("defaultMode");
-        
-        // Map Settings
-        String defaultLatitude = getPropertyString("defaultLatitude");
-        String defaultLongitude = getPropertyString("defaultLongitude");
-        String defaultZoom = getPropertyString("defaultZoom");
-        String tileProvider = getPropertyString("tileProvider");
-        String showSatelliteOption = getPropertyString("showSatelliteOption");
-        String mapHeight = getPropertyString("mapHeight");
-
-        // Validation Rules
-        String minAreaHectares = getPropertyString("minAreaHectares");
-        String maxAreaHectares = getPropertyString("maxAreaHectares");
-        String minVertices = getPropertyString("minVertices");
-        String maxVertices = getPropertyString("maxVertices");
-        String allowSelfIntersection = getPropertyString("allowSelfIntersection");
-
-        // Overlap Checking
-        String enableOverlapCheck = getPropertyString("enableOverlapCheck");
-        String overlapFormId = getPropertyString("overlapFormId");
-        String overlapGeometryField = getPropertyString("overlapGeometryField");
-        String overlapDisplayFields = getPropertyString("overlapDisplayFields");
-        String overlapFilterCondition = getPropertyString("overlapFilterCondition");
-
-        // Nearby Parcels Display
-        String showNearbyParcels = getPropertyString("showNearbyParcels");
-        String nearbyParcelsFormId = getPropertyString("nearbyParcelsFormId");
-        String nearbyParcelsGeometryField = getPropertyString("nearbyParcelsGeometryField");
-        String nearbyParcelsDisplayFields = getPropertyString("nearbyParcelsDisplayFields");
-        String nearbyParcelsFilterCondition = getPropertyString("nearbyParcelsFilterCondition");
-        String nearbyParcelsFillColor = getPropertyString("nearbyParcelsFillColor");
-        String nearbyParcelsFillOpacity = getPropertyString("nearbyParcelsFillOpacity");
-        String nearbyParcelsStrokeColor = getPropertyString("nearbyParcelsStrokeColor");
-        String nearbyParcelsMaxResults = getPropertyString("nearbyParcelsMaxResults");
-
-        // GPS Settings (Walk Mode)
-        String gpsHighAccuracy = getPropertyString("gpsHighAccuracy");
-        String gpsMinAccuracy = getPropertyString("gpsMinAccuracy");
-        String autoCloseDistance = getPropertyString("autoCloseDistance");
-
-        // Appearance
-        String fillColor = getPropertyString("fillColor");
-        String fillOpacity = getPropertyString("fillOpacity");
-        String strokeColor = getPropertyString("strokeColor");
-        String strokeWidth = getPropertyString("strokeWidth");
-
-        // API Settings
-        String apiEndpoint = getPropertyString("apiEndpoint");
+        String apiEndpoint = getPropertyWithDefault(getPropertyString("apiEndpoint"), "/jw/api/gis/gis");
         String apiId = getPropertyString("apiId");
         String apiKey = getPropertyString("apiKey");
+        int mapHeight = parseIntSafe(getPropertyString("mapHeight"), GisConfigBuilder.DEFAULT_MAP_HEIGHT);
 
-        // Get record ID for edit mode (to exclude from overlap checking)
-        String recordId = "";
-        if (formData != null) {
-            // Get primary key value - this is set when editing an existing record
-            String primaryKey = formData.getPrimaryKeyValue();
-            if (primaryKey != null && !primaryKey.isEmpty()) {
-                recordId = primaryKey;
-            }
-        }
+        // =================================================================
+        // Phase 2: Extract record ID for edit mode (delegated to helper)
+        // =================================================================
+        String recordId = RecordIdExtractor.extract(formData, this);
+        LogUtil.debug(CLASS_NAME, "RecordId final value: " + recordId);
 
-        // Apply defaults
-        if (captureMode == null || captureMode.isEmpty()) captureMode = "BOTH";
-        if (defaultMode == null || defaultMode.isEmpty()) defaultMode = "AUTO";
-        if (defaultLatitude == null || defaultLatitude.isEmpty()) defaultLatitude = "-29.5";
-        if (defaultLongitude == null || defaultLongitude.isEmpty()) defaultLongitude = "28.5";
-        if (defaultZoom == null || defaultZoom.isEmpty()) defaultZoom = "10";
-        if (tileProvider == null || tileProvider.isEmpty()) tileProvider = "OSM";
-        if (showSatelliteOption == null || showSatelliteOption.isEmpty()) showSatelliteOption = "true";
-        if (mapHeight == null || mapHeight.isEmpty()) mapHeight = "400";
-        if (minAreaHectares == null || minAreaHectares.isEmpty()) minAreaHectares = "0.01";
-        if (maxAreaHectares == null || maxAreaHectares.isEmpty()) maxAreaHectares = "1000";
-        if (minVertices == null || minVertices.isEmpty()) minVertices = "3";
-        if (maxVertices == null || maxVertices.isEmpty()) maxVertices = "100";
-        if (gpsHighAccuracy == null || gpsHighAccuracy.isEmpty()) gpsHighAccuracy = "true";
-        if (gpsMinAccuracy == null || gpsMinAccuracy.isEmpty()) gpsMinAccuracy = "10";
-        if (autoCloseDistance == null || autoCloseDistance.isEmpty()) autoCloseDistance = "15";
-        if (fillColor == null || fillColor.isEmpty()) fillColor = "#3388ff";
-        if (fillOpacity == null || fillOpacity.isEmpty()) fillOpacity = "0.2";
-        if (strokeColor == null || strokeColor.isEmpty()) strokeColor = "#3388ff";
-        if (strokeWidth == null || strokeWidth.isEmpty()) strokeWidth = "3";
-        if (apiEndpoint == null || apiEndpoint.isEmpty()) apiEndpoint = "/jw/api/gis/gis";
-
-        // Get current value (GeoJSON geometry)
+        // =================================================================
+        // Phase 3: Get current GeoJSON value
+        // =================================================================
         String value = FormUtil.getElementPropertyValue(this, formData);
         if (value == null) {
             value = "";
         }
 
-        // Build configuration JSON for JavaScript
-        JSONObject config = new JSONObject();
-        try {
-            config.put("captureMode", captureMode);
-            config.put("defaultMode", defaultMode);
-            config.put("defaultLatitude", Double.parseDouble(defaultLatitude));
-            config.put("defaultLongitude", Double.parseDouble(defaultLongitude));
-            config.put("defaultZoom", Integer.parseInt(defaultZoom));
-            config.put("tileProvider", tileProvider);
-            config.put("showSatelliteOption", "true".equals(showSatelliteOption));
-            config.put("mapHeight", Integer.parseInt(mapHeight));
-            
-            // Validation config
-            JSONObject validation = new JSONObject();
-            validation.put("minAreaHectares", Double.parseDouble(minAreaHectares));
-            validation.put("maxAreaHectares", Double.parseDouble(maxAreaHectares));
-            validation.put("minVertices", Integer.parseInt(minVertices));
-            validation.put("maxVertices", Integer.parseInt(maxVertices));
-            validation.put("allowSelfIntersection", "true".equals(allowSelfIntersection));
-            config.put("validation", validation);
-            
-            // GPS config
-            JSONObject gps = new JSONObject();
-            gps.put("highAccuracy", "true".equals(gpsHighAccuracy));
-            gps.put("minAccuracy", Double.parseDouble(gpsMinAccuracy));
-            gps.put("autoCloseDistance", Double.parseDouble(autoCloseDistance));
-            config.put("gps", gps);
-            
-            // Style config
-            JSONObject style = new JSONObject();
-            style.put("fillColor", fillColor);
-            style.put("fillOpacity", Double.parseDouble(fillOpacity));
-            style.put("strokeColor", strokeColor);
-            style.put("strokeWidth", Integer.parseInt(strokeWidth));
-            config.put("style", style);
+        // =================================================================
+        // Phase 4: Build configuration JSON using fluent builder
+        // =================================================================
+        String configJson = buildConfigJson();
 
-            // Overlap config
-            if ("true".equals(enableOverlapCheck)) {
-                JSONObject overlap = new JSONObject();
-                overlap.put("enabled", true);
-                overlap.put("formId", overlapFormId != null ? overlapFormId : "");
-                overlap.put("geometryField", overlapGeometryField != null ? overlapGeometryField : "");
-                overlap.put("displayFields", overlapDisplayFields != null ? overlapDisplayFields : "");
-                overlap.put("filterCondition", overlapFilterCondition != null ? overlapFilterCondition : "");
-                config.put("overlap", overlap);
-            }
-
-            // Nearby Parcels Display config
-            if (showNearbyParcels != null && !"DISABLED".equals(showNearbyParcels) && !showNearbyParcels.isEmpty()) {
-                JSONObject nearbyParcels = new JSONObject();
-                nearbyParcels.put("enabled", showNearbyParcels);
-                nearbyParcels.put("formId", nearbyParcelsFormId != null ? nearbyParcelsFormId : "");
-                nearbyParcels.put("geometryFieldId", nearbyParcelsGeometryField != null ? nearbyParcelsGeometryField : "c_geometry");
-                nearbyParcels.put("displayFields", nearbyParcelsDisplayFields != null ? nearbyParcelsDisplayFields : "");
-                nearbyParcels.put("filterCondition", nearbyParcelsFilterCondition != null ? nearbyParcelsFilterCondition : "");
-                nearbyParcels.put("maxResults", nearbyParcelsMaxResults != null && !nearbyParcelsMaxResults.isEmpty()
-                    ? Integer.parseInt(nearbyParcelsMaxResults) : 100);
-
-                // Style configuration
-                JSONObject nearbyStyle = new JSONObject();
-                nearbyStyle.put("fillColor", nearbyParcelsFillColor != null && !nearbyParcelsFillColor.isEmpty()
-                    ? nearbyParcelsFillColor : "#808080");
-                nearbyStyle.put("fillOpacity", nearbyParcelsFillOpacity != null && !nearbyParcelsFillOpacity.isEmpty()
-                    ? Double.parseDouble(nearbyParcelsFillOpacity) : 0.15);
-                nearbyStyle.put("strokeColor", nearbyParcelsStrokeColor != null && !nearbyParcelsStrokeColor.isEmpty()
-                    ? nearbyParcelsStrokeColor : "#666666");
-                nearbyStyle.put("strokeWidth", 1);
-                nearbyStyle.put("strokeDashArray", "3, 3");
-                nearbyParcels.put("style", nearbyStyle);
-
-                config.put("nearbyParcels", nearbyParcels);
-            }
-
-            // Output field mapping
-            JSONObject outputFields = new JSONObject();
-            outputFields.put("areaFieldId", areaFieldId != null ? areaFieldId : "");
-            outputFields.put("perimeterFieldId", perimeterFieldId != null ? perimeterFieldId : "");
-            outputFields.put("centroidFieldId", centroidFieldId != null ? centroidFieldId : "");
-            outputFields.put("vertexCountFieldId", vertexCountFieldId != null ? vertexCountFieldId : "");
-            config.put("outputFields", outputFields);
-
-        } catch (Exception e) {
-            LogUtil.error(CLASS_NAME, e, "Error building config JSON");
-        }
-
-        // Base URL for static resources (PluginWebSupport)
+        // =================================================================
+        // Phase 5: Populate data model
+        // =================================================================
         String resourceBase = "/jw/web/json/plugin/" + GisResourcesPlugin.class.getName() + "/service?file=";
 
-        // Add to data model
         dataModel.put("fieldId", fieldId);
         dataModel.put("value", value);
         dataModel.put("resourceBase", resourceBase);
         dataModel.put("apiBase", apiEndpoint);
-        dataModel.put("apiId", apiId != null ? apiId : "");
-        dataModel.put("apiKey", apiKey != null ? apiKey : "");
+        dataModel.put("apiId", getPropertyWithDefault(apiId, ""));
+        dataModel.put("apiKey", getPropertyWithDefault(apiKey, ""));
         dataModel.put("elementId", "gis_" + fieldId + "_" + System.currentTimeMillis());
-        dataModel.put("config", config.toString());
+        dataModel.put("config", configJson);
         dataModel.put("mapHeight", mapHeight);
 
         // Output field IDs for JavaScript
-        dataModel.put("areaFieldId", areaFieldId != null ? areaFieldId : "");
-        dataModel.put("perimeterFieldId", perimeterFieldId != null ? perimeterFieldId : "");
-        dataModel.put("centroidFieldId", centroidFieldId != null ? centroidFieldId : "");
-        dataModel.put("vertexCountFieldId", vertexCountFieldId != null ? vertexCountFieldId : "");
+        dataModel.put("areaFieldId", getPropertyWithDefault(getPropertyString("areaFieldId"), ""));
+        dataModel.put("perimeterFieldId", getPropertyWithDefault(getPropertyString("perimeterFieldId"), ""));
+        dataModel.put("centroidFieldId", getPropertyWithDefault(getPropertyString("centroidFieldId"), ""));
+        dataModel.put("vertexCountFieldId", getPropertyWithDefault(getPropertyString("vertexCountFieldId"), ""));
 
         // Record ID for edit mode (to exclude from overlap checking)
         dataModel.put("recordId", recordId);
 
-        // Render
-        String html = FormUtil.generateElementHtml(this, formData, template, dataModel);
-        return html;
+        // =================================================================
+        // Phase 6: Render template
+        // =================================================================
+        return FormUtil.generateElementHtml(this, formData, template, dataModel);
+    }
+
+    /**
+     * Build the configuration JSON using GisConfigBuilder.
+     * This method extracts all properties and constructs the config object.
+     *
+     * @return JSON string for the JavaScript component
+     */
+    private String buildConfigJson() {
+        // Sanitize filter conditions for security
+        String overlapFilter = sanitizeFilterCondition(getPropertyString("overlapFilterCondition"));
+        String nearbyFilter = sanitizeFilterCondition(getPropertyString("nearbyParcelsFilterCondition"));
+
+        GisConfigBuilder builder = new GisConfigBuilder();
+
+        // Map settings
+        builder.withMapSettings(
+            getPropertyString("tileProvider"),
+            parseDoubleSafe(getPropertyString("defaultLatitude"), GisConfigBuilder.DEFAULT_LATITUDE),
+            parseDoubleSafe(getPropertyString("defaultLongitude"), GisConfigBuilder.DEFAULT_LONGITUDE),
+            parseIntSafe(getPropertyString("defaultZoom"), GisConfigBuilder.DEFAULT_ZOOM),
+            parseIntSafe(getPropertyString("mapHeight"), GisConfigBuilder.DEFAULT_MAP_HEIGHT),
+            !"false".equals(getPropertyWithDefault(getPropertyString("showSatelliteOption"), "true"))
+        );
+
+        // Capture mode
+        builder.withCaptureMode(
+            getPropertyString("captureMode"),
+            getPropertyString("defaultMode")
+        );
+
+        // Validation rules
+        builder.withValidation(
+            parseDoubleSafe(getPropertyString("minAreaHectares"), GisConfigBuilder.DEFAULT_MIN_AREA_HECTARES),
+            parseDoubleSafe(getPropertyString("maxAreaHectares"), GisConfigBuilder.DEFAULT_MAX_AREA_HECTARES),
+            parseIntSafe(getPropertyString("minVertices"), GisConfigBuilder.DEFAULT_MIN_VERTICES),
+            parseIntSafe(getPropertyString("maxVertices"), GisConfigBuilder.DEFAULT_MAX_VERTICES),
+            "true".equals(getPropertyString("allowSelfIntersection"))
+        );
+
+        // GPS settings
+        builder.withGpsSettings(
+            !"false".equals(getPropertyWithDefault(getPropertyString("gpsHighAccuracy"), "true")),
+            parseDoubleSafe(getPropertyString("gpsMinAccuracy"), GisConfigBuilder.DEFAULT_GPS_MIN_ACCURACY),
+            parseDoubleSafe(getPropertyString("autoCloseDistance"), GisConfigBuilder.DEFAULT_AUTO_CLOSE_DISTANCE)
+        );
+
+        // Style
+        builder.withStyle(
+            getPropertyWithDefault(getPropertyString("fillColor"), GisConfigBuilder.DEFAULT_FILL_COLOR),
+            parseDoubleSafe(getPropertyString("fillOpacity"), GisConfigBuilder.DEFAULT_FILL_OPACITY),
+            getPropertyWithDefault(getPropertyString("strokeColor"), GisConfigBuilder.DEFAULT_STROKE_COLOR),
+            parseIntSafe(getPropertyString("strokeWidth"), GisConfigBuilder.DEFAULT_STROKE_WIDTH)
+        );
+
+        // Output fields
+        builder.withOutputFields(
+            getPropertyString("areaFieldId"),
+            getPropertyString("perimeterFieldId"),
+            getPropertyString("centroidFieldId"),
+            getPropertyString("vertexCountFieldId")
+        );
+
+        // Overlap checking (optional)
+        if ("true".equals(getPropertyString("enableOverlapCheck"))) {
+            builder.withOverlapCheck(
+                getPropertyString("overlapFormId"),
+                getPropertyString("overlapGeometryField"),
+                getPropertyString("overlapDisplayFields"),
+                overlapFilter
+            );
+        }
+
+        // Nearby parcels (optional)
+        String showNearbyParcels = getPropertyString("showNearbyParcels");
+        if (showNearbyParcels != null && !showNearbyParcels.isEmpty() && !"DISABLED".equals(showNearbyParcels)) {
+            builder.withNearbyParcels(
+                showNearbyParcels,
+                getPropertyString("nearbyParcelsFormId"),
+                getPropertyString("nearbyParcelsGeometryField"),
+                getPropertyString("nearbyParcelsDisplayFields"),
+                nearbyFilter,
+                parseIntSafe(getPropertyString("nearbyParcelsMaxResults"), GisConfigBuilder.DEFAULT_NEARBY_MAX_RESULTS),
+                getPropertyString("nearbyParcelsFillColor"),
+                parseDoubleSafe(getPropertyString("nearbyParcelsFillOpacity"), GisConfigBuilder.DEFAULT_NEARBY_FILL_OPACITY),
+                getPropertyString("nearbyParcelsStrokeColor")
+            );
+        }
+
+        // Auto-center (optional)
+        if ("true".equals(getPropertyString("enableAutoCenter"))) {
+            builder.withAutoCenter(
+                getPropertyString("autoCenterDistrictFieldId"),
+                getPropertyString("autoCenterVillageFieldId"),
+                getPropertyString("autoCenterLatFieldId"),
+                getPropertyString("autoCenterLonFieldId"),
+                getPropertyString("autoCenterCountrySuffix"),
+                parseIntSafe(getPropertyString("autoCenterZoom"), GisConfigBuilder.DEFAULT_AUTO_CENTER_ZOOM),
+                !"false".equals(getPropertyString("autoCenterRetryOnFieldChange"))
+            );
+        }
+
+        return builder.build();
     }
 
     @Override
@@ -312,7 +341,7 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
     public Boolean selfValidate(FormData formData) {
         String fieldId = FormUtil.getElementParameterName(this);
         String value = formData.getRequestParameter(fieldId);
-        
+
         // Check if required
         String required = getPropertyString("required");
         if ("true".equals(required) && (value == null || value.isEmpty())) {
@@ -324,21 +353,102 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
             return false;
         }
 
-        // Basic GeoJSON validation if value provided
+        // Comprehensive GeoJSON validation if value provided
         if (value != null && !value.isEmpty()) {
-            try {
-                JSONObject geojson = new JSONObject(value);
-                String type = geojson.optString("type", "");
-                if (!"Polygon".equals(type) && !"Feature".equals(type)) {
-                    formData.addFormError(fieldId, "Invalid geometry type. Expected Polygon.");
-                    return false;
-                }
-            } catch (Exception e) {
-                formData.addFormError(fieldId, "Invalid GeoJSON format");
+            String validationError = validateGeoJSON(value);
+            if (validationError != null) {
+                formData.addFormError(fieldId, validationError);
                 return false;
             }
         }
 
         return true;
+    }
+
+    /**
+     * Validate GeoJSON structure and coordinate bounds.
+     *
+     * @param geojsonStr The GeoJSON string to validate
+     * @return Error message if invalid, null if valid
+     */
+    private String validateGeoJSON(String geojsonStr) {
+        try {
+            JSONObject geojson = new JSONObject(geojsonStr);
+            String type = geojson.optString("type", "");
+
+            // Handle Feature type - extract geometry
+            JSONObject geometry;
+            if ("Feature".equals(type)) {
+                geometry = geojson.optJSONObject("geometry");
+                if (geometry == null) {
+                    return "Feature is missing geometry";
+                }
+            } else if ("Polygon".equals(type)) {
+                geometry = geojson;
+            } else {
+                return "Invalid geometry type. Expected Polygon or Feature.";
+            }
+
+            // Verify geometry type is Polygon
+            String geometryType = geometry.optString("type", "");
+            if (!"Polygon".equals(geometryType)) {
+                return "Invalid geometry type. Expected Polygon.";
+            }
+
+            // Validate coordinates exist
+            JSONArray coordinates = geometry.optJSONArray("coordinates");
+            if (coordinates == null || coordinates.length() == 0) {
+                return "Polygon is missing coordinates";
+            }
+
+            // Get the outer ring (first coordinate array)
+            JSONArray outerRing = coordinates.optJSONArray(0);
+            if (outerRing == null || outerRing.length() < 4) {
+                return "Polygon must have at least 4 coordinate points (3 vertices + closing point)";
+            }
+
+            // Validate each coordinate
+            for (int i = 0; i < outerRing.length(); i++) {
+                JSONArray coord = outerRing.optJSONArray(i);
+                if (coord == null || coord.length() < 2) {
+                    return "Invalid coordinate at position " + i;
+                }
+
+                double lng = coord.optDouble(0, Double.NaN);
+                double lat = coord.optDouble(1, Double.NaN);
+
+                if (Double.isNaN(lng) || Double.isNaN(lat)) {
+                    return "Invalid coordinate values at position " + i;
+                }
+
+                // Validate coordinate bounds
+                if (lat < -90 || lat > 90) {
+                    return "Latitude out of bounds at position " + i + ": " + lat;
+                }
+                if (lng < -180 || lng > 180) {
+                    return "Longitude out of bounds at position " + i + ": " + lng;
+                }
+            }
+
+            // Verify polygon is closed (first coord == last coord)
+            JSONArray firstCoord = outerRing.optJSONArray(0);
+            JSONArray lastCoord = outerRing.optJSONArray(outerRing.length() - 1);
+            if (firstCoord != null && lastCoord != null) {
+                double firstLng = firstCoord.optDouble(0, Double.NaN);
+                double firstLat = firstCoord.optDouble(1, Double.NaN);
+                double lastLng = lastCoord.optDouble(0, Double.NaN);
+                double lastLat = lastCoord.optDouble(1, Double.NaN);
+
+                if (Math.abs(firstLng - lastLng) > 0.0000001 || Math.abs(firstLat - lastLat) > 0.0000001) {
+                    return "Polygon is not closed (first and last coordinates must match)";
+                }
+            }
+
+            return null; // Valid
+
+        } catch (Exception e) {
+            LogUtil.debug(CLASS_NAME, "GeoJSON validation error: " + e.getMessage());
+            return "Invalid GeoJSON format: " + e.getMessage();
+        }
     }
 }

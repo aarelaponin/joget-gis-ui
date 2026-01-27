@@ -14,31 +14,40 @@
                 "apiKey": "%%%%****SECURE_VALUE****-0%%%%",
                 "overlapDisplayFields": "areaId",
                 "defaultLatitude": "-29.5",
+                "nearbyParcelsDisplayFields": "",
                 "defaultLongitude": "28.5",
                 "overlapFilterCondition": "",
                 "required": "",
+                "nearbyParcelsGeometryField": "",
                 "fillColor": "#3388ff",
                 "gpsHighAccuracy": "true",
                 "autoCloseDistance": "15",
+                "nearbyParcelsFilterCondition": "",
                 "minVertices": "3",
                 "enableOverlapCheck": "true",
-                "minAreaHectares": "1",
+                "minAreaHectares": "0.1",
                 "gpsMinAccuracy": "10",
+                "nearbyParcelsStrokeColor": "",
                 "id": "geometry",
                 "maxAreaHectares": "1000",
                 "strokeColor": "#3388ff",
                 "apiId": "API-dd317f63-9eb8-4816-9775-8a32c299679d",
                 "maxVertices": "100",
                 "showSatelliteOption": "true",
-                "perimeterFieldId": "",
-                "centroidFieldId": "",
+                "nearbyParcelsFillColor": "",
+                "perimeterFieldId": "perimeter",
+                "centroidFieldId": "centroid",
                 "label": "",
                 "overlapGeometryField": "geometry",
+                "nearbyParcelsFillOpacity": "",
+                "nearbyParcelsMaxResults": "",
                 "mapHeight": "600",
-                "vertexCountFieldId": "",
+                "vertexCountFieldId": "vertex_count",
                 "apiEndpoint": "/jw/api/gis/gis",
+                "nearbyParcelsFormId": "",
                 "defaultMode": "AUTO",
                 "overlapFormId": "gisData",
+                "showNearbyParcels": "DISABLED",
                 "areaFieldId": "",
                 "tileProvider": "OSM",
                 "captureMode": "BOTH",
@@ -55,6 +64,45 @@
                 "isDistributedGeneration": "",
                 "label": "Area ID",
                 "id": "areaId"
+              }
+            },
+            {
+              "className": "org.joget.apps.form.lib.HiddenField",
+              "properties": {
+                "useDefaultWhenEmpty": "",
+                "id": "perimeter",
+                "value": "",
+                "validator": {
+                  "className": "",
+                  "properties": {}
+                },
+                "workflowVariable": ""
+              }
+            },
+            {
+              "className": "org.joget.apps.form.lib.HiddenField",
+              "properties": {
+                "useDefaultWhenEmpty": "",
+                "id": "centroid",
+                "value": "",
+                "validator": {
+                  "className": "",
+                  "properties": {}
+                },
+                "workflowVariable": ""
+              }
+            },
+            {
+              "className": "org.joget.apps.form.lib.HiddenField",
+              "properties": {
+                "useDefaultWhenEmpty": "",
+                "id": "vertex_count",
+                "value": "",
+                "validator": {
+                  "className": "",
+                  "properties": {}
+                },
+                "workflowVariable": ""
               }
             }
           ],

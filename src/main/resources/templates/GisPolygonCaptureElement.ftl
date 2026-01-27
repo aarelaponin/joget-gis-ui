@@ -1,4 +1,11 @@
 <#-- GIS Polygon Capture Form Element Template -->
+
+<#-- Resource hints for CDN preconnection - improves load time on slow networks -->
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="dns-prefetch" href="https://unpkg.com">
+<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+
 <div class="form-cell gis-form-cell-fullwidth" style="display: block !important; width: 100% !important; float: none !important; clear: both !important;" ${elementMetaData!}>
     <label class="label" style="display: block !important; width: 100% !important; max-width: 100% !important; float: none !important; margin-bottom: 8px !important; text-align: left !important;">
         ${element.properties.label!}
@@ -15,7 +22,7 @@
 </div>
 
 <#-- Cache bust version -->
-<#assign gisCacheVersion = "20260106_v13">
+<#assign gisCacheVersion = "20260127_v17">
 
 <#-- Load Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
@@ -40,9 +47,9 @@
     }
 
     /**
-     * Load a script by URL
+     * Load a script by URL with optional fallback
      */
-    function loadScript(src, callback) {
+    function loadScript(src, callback, fallbackSrc) {
         var filename = src;
         var fileParam = src.match(/[?&]file=([^&]+)/);
         if (fileParam) {
@@ -54,6 +61,13 @@
         // Check if Leaflet is already loaded
         if (filename === 'leaflet.js' && typeof L !== 'undefined') {
             log('Leaflet already loaded');
+            callback();
+            return;
+        }
+
+        // Check if Turf is already loaded
+        if (src.indexOf('turf') !== -1 && typeof turf !== 'undefined') {
+            log('Turf.js already loaded');
             callback();
             return;
         }
@@ -72,12 +86,20 @@
 
         script.onload = function() {
             log('Loaded: ' + filename);
-            setTimeout(callback, 50);
+            // Execute callback immediately - no artificial delay needed
+            // The browser's onload event already ensures the script is ready
+            callback();
         };
 
         script.onerror = function(e) {
             console.error('[GIS] Failed to load script: ' + src, e);
-            callback();
+            // Try fallback CDN if available
+            if (fallbackSrc) {
+                log('Trying fallback CDN: ' + fallbackSrc);
+                loadScript(fallbackSrc, callback);
+            } else {
+                callback();
+            }
         };
 
         document.head.appendChild(script);
@@ -86,12 +108,20 @@
     /**
      * Initialize the map component
      */
+    var initMapRetryCount = 0;
+    var MAX_INIT_RETRIES = 50; // Max 5 seconds of retries (50 * 100ms)
+
     function initMap() {
         log('initMap called');
 
         var container = document.getElementById('${elementId!}');
         if (!container) {
-            log('Container not found, retrying in 100ms...');
+            initMapRetryCount++;
+            if (initMapRetryCount > MAX_INIT_RETRIES) {
+                console.error('[GIS] Container not found after ' + MAX_INIT_RETRIES + ' retries, giving up.');
+                return;
+            }
+            log('Container not found, retrying in 100ms... (attempt ' + initMapRetryCount + ')');
             setTimeout(initMap, 100);
             return;
         }
@@ -114,9 +144,15 @@
 
         try {
             var config = ${config!'{}'};
-            
+
+            // Validate API base URL for security (must be relative path or HTTPS)
+            var apiBase = '${apiBase!}';
+            if (apiBase && !apiBase.startsWith('/') && !apiBase.startsWith('https://')) {
+                console.warn('[GIS] API base URL should use HTTPS or be a relative path');
+            }
+
             var capture = GISCapture.init('${elementId!}', {
-                apiBase: '${apiBase!}',
+                apiBase: apiBase,
                 apiId: '${apiId!}',
                 apiKey: '${apiKey!}',
                 hiddenFieldId: '${fieldId!}',
@@ -139,6 +175,8 @@
                 gps: config.gps || {},
                 style: config.style || {},
                 overlap: config.overlap || null,
+                nearbyParcels: config.nearbyParcels || null,
+                autoCenter: config.autoCenter || null,
                 onGeometryChange: function(geojson, metrics) {
                     log('Geometry changed: ' + (metrics ? metrics.areaHectares + ' ha' : 'cleared'));
                 },
@@ -166,23 +204,46 @@
     log('Resource base: ' + resourceBase + ', version: ' + cacheVersion);
 
     // Load scripts in sequence: Leaflet -> Turf -> GIS Capture -> Init
-    loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', function() {
-        log('Leaflet loaded, typeof L = ' + typeof L);
+    // Each has a fallback CDN in case the primary CDN is unavailable
+    loadScript(
+        'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+        function() {
+            log('Leaflet loaded, typeof L = ' + typeof L);
 
-        loadScript('https://unpkg.com/@turf/turf@6/turf.min.js', function() {
-            log('Turf.js loaded, typeof turf = ' + typeof turf);
+            // Verify Leaflet loaded successfully
+            if (typeof L === 'undefined') {
+                console.error('[GIS] Leaflet failed to load from all CDNs');
+                return;
+            }
 
-            loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
-                log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+            loadScript(
+                'https://unpkg.com/@turf/turf@6/turf.min.js',
+                function() {
+                    log('Turf.js loaded, typeof turf = ' + typeof turf);
 
-                if (document.readyState === 'complete') {
-                    initMap();
-                } else {
-                    window.addEventListener('load', initMap);
-                }
-            });
-        });
-    });
+                    // Verify Turf loaded successfully
+                    if (typeof turf === 'undefined') {
+                        console.error('[GIS] Turf.js failed to load from all CDNs');
+                        return;
+                    }
+
+                    loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
+                        log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+
+                        if (document.readyState === 'complete') {
+                            initMap();
+                        } else {
+                            window.addEventListener('load', initMap);
+                        }
+                    });
+                },
+                // Fallback CDN for Turf.js
+                'https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js'
+            );
+        },
+        // Fallback CDN for Leaflet
+        'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js'
+    );
 
 })();
 </script>

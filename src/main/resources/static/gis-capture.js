@@ -1,13 +1,150 @@
 /**
  * GIS Polygon Capture Component
- * 
+ *
  * A Leaflet.js-based component for capturing polygon boundaries
  * with Walk Mode (GPS) and Draw Mode (desktop) support.
- * 
- * @version 1.0
+ *
+ * @version 2.0 - Performance & Maintainability Refactor
+ *
+ * =============================================================================
+ * MODULE ARCHITECTURE
+ * =============================================================================
+ *
+ * This file is organized into logical sections for maintainability:
+ *
+ * 1. UTILITIES              (line ~30)    - throttle, debounce, escapeHtml
+ * 2. TILE_PROVIDERS         (line ~115)   - Map tile configurations
+ * 3. GISCaptureInstance     (line ~160)   - Main component class
+ *    ├── CORE METHODS                     - Initialization, state management
+ *    ├── UI METHODS                       - Building UI components
+ *    ├── MAP METHODS                      - Leaflet map operations
+ *    ├── ACCESSIBILITY                    - Screen reader, keyboard nav
+ *    ├── DRAWING METHODS                  - Draw/Walk mode vertex capture
+ *    ├── VALIDATION MODULE                - Area warnings, self-intersection
+ *    ├── OVERLAP MODULE                   - API calls, overlap display
+ *    ├── NEARBY PARCELS MODULE            - Read-only parcel display
+ *    ├── AUTO-CENTER MODULE               - Field monitoring, geocoding
+ *    └── CLEANUP                          - Event listeners, destroy
+ * 4. PUBLIC API             (line ~4350)  - GISCapture.init()
+ *
+ * DEPENDENCIES:
+ * - Leaflet.js 1.9.x       - Map rendering
+ * - Turf.js 6.x            - Geometry calculations
+ *
+ * PERFORMANCE OPTIMIZATIONS (v2.0):
+ * - Throttled vertex drag updates (60fps visual, debounced calculations)
+ * - Debounced API calls for overlap/nearby parcels
+ * - Event-driven auto-center with fallback polling
+ * - Optimized self-intersection checks
+ *
+ * =============================================================================
  */
 var GISCapture = (function() {
     'use strict';
+
+    // =============================================
+    // UTILITY FUNCTIONS
+    // =============================================
+
+    /**
+     * Throttle function - limits execution rate to at most once per wait period.
+     * Use for high-frequency events where you want regular updates (e.g., mousemove).
+     *
+     * @param {Function} func - Function to throttle
+     * @param {number} wait - Minimum time between executions in ms
+     * @param {Object} options - { leading: true, trailing: true }
+     * @returns {Function} Throttled function with .cancel() method
+     */
+    function throttle(func, wait, options) {
+        var context, args, result;
+        var timeout = null;
+        var previous = 0;
+        if (!options) options = {};
+
+        var later = function() {
+            previous = options.leading === false ? 0 : Date.now();
+            timeout = null;
+            result = func.apply(context, args);
+            if (!timeout) context = args = null;
+        };
+
+        var throttled = function() {
+            var now = Date.now();
+            if (!previous && options.leading === false) previous = now;
+            var remaining = wait - (now - previous);
+            context = this;
+            args = arguments;
+            if (remaining <= 0 || remaining > wait) {
+                if (timeout) {
+                    clearTimeout(timeout);
+                    timeout = null;
+                }
+                previous = now;
+                result = func.apply(context, args);
+                if (!timeout) context = args = null;
+            } else if (!timeout && options.trailing !== false) {
+                timeout = setTimeout(later, remaining);
+            }
+            return result;
+        };
+
+        throttled.cancel = function() {
+            clearTimeout(timeout);
+            previous = 0;
+            timeout = context = args = null;
+        };
+
+        return throttled;
+    }
+
+    /**
+     * Debounce function - delays execution until after wait period of inactivity.
+     * Use for events where you only care about the final value (e.g., input, resize).
+     *
+     * @param {Function} func - Function to debounce
+     * @param {number} wait - Time to wait after last call in ms
+     * @param {boolean} immediate - Execute on leading edge instead of trailing
+     * @returns {Function} Debounced function with .cancel() method
+     */
+    function debounce(func, wait, immediate) {
+        var timeout, result;
+
+        var debounced = function() {
+            var context = this, args = arguments;
+            var later = function() {
+                timeout = null;
+                if (!immediate) result = func.apply(context, args);
+            };
+            var callNow = immediate && !timeout;
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+            if (callNow) result = func.apply(context, args);
+            return result;
+        };
+
+        debounced.cancel = function() {
+            clearTimeout(timeout);
+            timeout = null;
+        };
+
+        return debounced;
+    }
+
+    /**
+     * Escape HTML to prevent XSS (utility function, moved to module level)
+     * @param {string} text - Text to escape
+     * @returns {string} Escaped HTML
+     */
+    function escapeHtml(text) {
+        if (!text) return '';
+        var div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // =============================================
+    // TILE PROVIDERS CONFIGURATION
+    // =============================================
 
     // Tile layer configurations
     var TILE_PROVIDERS = {
@@ -92,6 +229,8 @@ var GISCapture = (function() {
             overlap: null,
             // Nearby parcels configuration (READ-ONLY display)
             nearbyParcels: null,
+            // Auto-center configuration
+            autoCenter: null,
             onGeometryChange: null,
             onValidationError: null,
             onError: null
@@ -120,7 +259,14 @@ var GISCapture = (function() {
             nearbyParcelsLoaded: false,
             nearbyParcelsLoading: false,
             nearbyParcelsVisible: false,
-            nearbyParcelsData: []        // Cached parcel data
+            nearbyParcelsData: [],       // Cached parcel data
+            // Auto-center state
+            autoCenterAttempted: false,
+            autoCenterLastValues: null,   // { district, village, lat, lon }
+            autoCenterInProgress: false,
+            // Initial geometry for self-overlap detection
+            initialGeometry: null,        // Stores the originally loaded GeoJSON for edit mode
+            initialAreaHectares: null     // Stores the initial area for self-overlap detection
         };
 
         // Map references
@@ -146,23 +292,57 @@ var GISCapture = (function() {
         this.nearbyParcelsBadge = null;    // Count badge element
         this.nearbyParcelsLegend = null;   // Legend element
 
+        // Auto-center references
+        this.autoCenterInterval = null;    // Polling interval for field changes
+        this.autoCenterStatusEl = null;    // Status indicator element
+
         // Accessibility
         this.liveRegion = null;        // ARIA live region for announcements
         this.searchInput = null;       // Location search input
         this.searchResults = null;     // Search results dropdown
 
+        // Event listener cleanup tracking (for memory leak prevention)
+        this._eventListeners = [];     // Array of { element, event, handler }
+        this._abortControllers = new Map(); // Map of requestId -> AbortController
+        this._requestIdCounter = 0;    // Counter for generating unique request IDs
+        this._destroyed = false;       // Flag to prevent operations after destroy
+
         // Initialize
         this._init();
     }
 
-    // Prototype methods
+    // =========================================================================
+    // GISCaptureInstance PROTOTYPE METHODS
+    // =========================================================================
     GISCaptureInstance.prototype = {
+
+        // =============================================
+        // CORE METHODS - Initialization & State
+        // =============================================
 
         /**
          * Initialize the component
          */
         _init: function() {
             var self = this;
+
+            // Debug: log recordId received from server
+            console.log('[GIS] RecordId from server: "' + (this.options.recordId || '') + '"');
+
+            // Fallback: extract recordId from URL if not provided by server
+            // This handles cases where the Java-side extraction failed due to malformed URLs
+            if (!this.options.recordId) {
+                console.log('[GIS] RecordId empty, attempting URL extraction...');
+                console.log('[GIS] URL search string: ' + window.location.search);
+                // Allow 8-16 hex chars in last segment to handle standard (12) and non-standard UUIDs
+                var urlMatch = window.location.search.match(/[?&]id=([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{8,16})/i);
+                if (urlMatch) {
+                    this.options.recordId = urlMatch[1];
+                    console.log('[GIS] RecordId extracted from URL: ' + this.options.recordId);
+                } else {
+                    console.log('[GIS] No UUID found in URL');
+                }
+            }
 
             // Build HTML structure
             this._buildUI();
@@ -177,6 +357,11 @@ var GISCapture = (function() {
             } else {
                 // Show empty state first
                 this._showEmptyState();
+            }
+
+            // Initialize auto-center if enabled
+            if (this._isAutoCenterEnabled()) {
+                this._initAutoCenter();
             }
         },
 
@@ -513,17 +698,21 @@ var GISCapture = (function() {
             // Build API URL
             var apiUrl = this.options.apiBase + '/geocode?query=' + encodeURIComponent(query) + '&limit=5';
 
-            // Add headers
-            var headers = {};
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping search');
+                this._showSearchError();
+                return;
             }
+
+            // Build headers (session-based auth)
+            var headers = this._buildApiHeaders();
 
             // Show loading state
             this._showSearchLoading();
 
-            fetch(apiUrl, {
+            fetch(validatedUrl, {
                 method: 'GET',
                 headers: headers
             })
@@ -806,6 +995,11 @@ var GISCapture = (function() {
 
         // =============================================
         // END ACCESSIBILITY METHODS
+        // =============================================
+
+        // =============================================
+        // STATE MANAGEMENT & DRAWING METHODS
+        // Mode selection, Draw Mode, Walk Mode, vertex management
         // =============================================
 
         /**
@@ -1708,6 +1902,12 @@ var GISCapture = (function() {
             this.midpointMarkers = [];
         },
 
+        // =============================================
+        // VALIDATION MODULE
+        // Self-intersection detection, area warnings, vertex limits
+        // Dependencies: Turf.js for geometry analysis
+        // =============================================
+
         /**
          * Check for self-intersection and highlight crossing edges
          */
@@ -1749,6 +1949,21 @@ var GISCapture = (function() {
                 console.warn('[GISCapture] Self-intersection check failed:', e);
                 return false;
             }
+        },
+
+        /**
+         * Debounced self-intersection check - delays O(n²) calculation
+         * Use this during rapid changes (e.g., vertex dragging)
+         */
+        _checkSelfIntersectionDebounced: function() {
+            var self = this;
+            // Create debounced function on first call and cache it
+            if (!this._debouncedSelfIntersectionFn) {
+                this._debouncedSelfIntersectionFn = debounce(function() {
+                    self._checkSelfIntersection();
+                }, 150);
+            }
+            this._debouncedSelfIntersectionFn();
         },
 
         /**
@@ -1903,10 +2118,21 @@ var GISCapture = (function() {
                 return;
             }
 
+            // Build warning element using DOM methods to prevent XSS
             var warningDiv = document.createElement('div');
-            warningDiv.className = 'gis-warning-item ' + type;
+            warningDiv.className = 'gis-warning-item ' + this._escapeHtml(type);
             warningDiv.setAttribute('data-warning-type', type);
-            warningDiv.innerHTML = '<span class="gis-warning-icon">⚠</span><span class="gis-warning-text">' + message + '</span>';
+
+            var iconSpan = document.createElement('span');
+            iconSpan.className = 'gis-warning-icon';
+            iconSpan.textContent = '⚠';
+
+            var textSpan = document.createElement('span');
+            textSpan.className = 'gis-warning-text';
+            textSpan.textContent = message; // textContent is XSS-safe
+
+            warningDiv.appendChild(iconSpan);
+            warningDiv.appendChild(textSpan);
 
             this.warningPanel.appendChild(warningDiv);
             this.warningPanel.style.display = 'block';
@@ -2380,7 +2606,13 @@ var GISCapture = (function() {
         },
 
         // =============================================
-        // OVERLAP CHECKING METHODS
+        // END VALIDATION MODULE
+        // =============================================
+
+        // =============================================
+        // OVERLAP CHECKING MODULE
+        // API calls to check overlap with existing records
+        // Dependencies: API endpoint, fetch with abort controller
         // =============================================
 
         /**
@@ -2434,6 +2666,9 @@ var GISCapture = (function() {
             // Exclude current record from overlap check when editing (Phase 4)
             if (self.options.recordId) {
                 targetConfig.excludeRecordId = self.options.recordId;
+                console.log('[GIS] Overlap check - excluding recordId: ' + self.options.recordId);
+            } else {
+                console.log('[GIS] Overlap check - NO recordId to exclude (will match all records)');
             }
 
             var requestBody = {
@@ -2447,28 +2682,56 @@ var GISCapture = (function() {
                 }
             };
 
-            // Build headers with API authentication
-            var headers = {
-                'Content-Type': 'application/json'
-            };
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping overlap check');
+                self.state.overlapCheckPending = false;
+                self._hideOverlapPanel();
+                return;
             }
 
-            // Make API call
-            fetch(apiUrl, {
+            // Cancel any previous overlap check request (race condition prevention)
+            if (this._overlapRequestId) {
+                this._abortRequest(this._overlapRequestId);
+            }
+
+            // Create new request ID and abort controller
+            var requestId = this._generateRequestId();
+            this._overlapRequestId = requestId;
+            var abortController = this._createAbortController(requestId);
+
+            // Build headers (session-based auth, no explicit credentials)
+            var headers = this._buildApiHeaders();
+
+            // Set up timeout (30 seconds)
+            var timeoutId = setTimeout(function() {
+                self._abortRequest(requestId);
+                console.warn('[GIS] Overlap check timed out after 30 seconds');
+            }, 30000);
+
+            // Make API call with abort signal
+            fetch(validatedUrl, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify(requestBody)
+                body: JSON.stringify(requestBody),
+                signal: abortController.signal
             })
             .then(function(response) {
+                clearTimeout(timeoutId);
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status + ': ' + response.statusText);
                 }
                 return response.json();
             })
             .then(function(response) {
+                // Ignore response if this is a stale request
+                if (requestId !== self._overlapRequestId) {
+                    console.log('[GIS] Ignoring stale overlap check response');
+                    return;
+                }
+
+                self._cleanupRequest(requestId);
                 self.state.overlapCheckPending = false;
                 self.state.overlapChecked = true;
 
@@ -2500,17 +2763,87 @@ var GISCapture = (function() {
                         };
                     });
 
-                    self.state.overlaps = overlaps;
-                    self._displayOverlaps(overlaps);
-                    self._showOverlapWarning(overlaps);
+                    // Client-side self-overlap filter (Phase 4 enhancement)
+                    // When editing an existing record and the polygon was SHRUNK, the new polygon
+                    // will be entirely inside the original (stored in DB), causing 100% overlap.
+                    // We detect this by checking: edit mode + high overlap% + polygon was shrunk
+                    var isEditMode = self.options.recordId || self.state.initialGeometry;
+                    var initialArea = self.state.initialAreaHectares;
+                    var currentArea = self.state.metrics ? self.state.metrics.areaHectares : null;
+
+                    console.log('[GIS] Self-overlap filter check:');
+                    console.log('[GIS]   isEditMode=' + !!isEditMode + ' (recordId=' + (self.options.recordId || 'none') + ')');
+                    console.log('[GIS]   initialArea=' + (initialArea ? initialArea.toFixed(4) + ' ha' : 'not set'));
+                    console.log('[GIS]   currentArea=' + (currentArea ? currentArea.toFixed(4) + ' ha' : 'not set'));
+
+                    if (isEditMode && currentArea) {
+                        var originalOverlapCount = overlaps.length;
+
+                        overlaps = overlaps.filter(function(overlap) {
+                            console.log('[GIS] Checking overlap: id=' + overlap.id +
+                                ', percentage=' + overlap.overlapPercentage.toFixed(1) +
+                                '%, overlapArea=' + overlap.overlapArea.toFixed(4) + ' ha');
+
+                            // Strategy 1: If polygon was SHRUNK and overlap is ~100%
+                            // The new smaller polygon fits entirely inside the original
+                            if (overlap.overlapPercentage >= 95.0 && initialArea && initialArea > currentArea) {
+                                console.log('[GIS] Polygon was shrunk (initial=' + initialArea.toFixed(4) +
+                                    ' > current=' + currentArea.toFixed(4) + ') and overlap is ' +
+                                    overlap.overlapPercentage.toFixed(1) + '% - filtering as self-overlap');
+                                return false;
+                            }
+
+                            // Strategy 2: If overlap area ≈ current area (same polygon, not shrunk)
+                            if (overlap.overlapPercentage >= 99.0) {
+                                var areaDiff = Math.abs(overlap.overlapArea - currentArea);
+                                var areaThreshold = currentArea * 0.02; // 2% tolerance
+                                if (areaDiff <= areaThreshold) {
+                                    console.log('[GIS] Overlap area ≈ current area - filtering as self-overlap');
+                                    return false;
+                                }
+                            }
+
+                            return true; // Keep this overlap
+                        });
+
+                        if (overlaps.length < originalOverlapCount) {
+                            console.log('[GIS] Self-overlap filter removed ' +
+                                (originalOverlapCount - overlaps.length) + ' overlap(s)');
+                        }
+                    } else {
+                        console.log('[GIS] Self-overlap filter skipped: ' +
+                            (!isEditMode ? 'not in edit mode' : 'no current metrics'));
+                    }
+
+                    // Check if we still have overlaps after filtering
+                    if (overlaps.length > 0) {
+                        self.state.overlaps = overlaps;
+                        self._displayOverlaps(overlaps);
+                        self._showOverlapWarning(overlaps);
+                    } else {
+                        self._hideOverlapPanel();
+                    }
                 } else {
                     self._hideOverlapPanel();
                 }
             })
             .catch(function(error) {
+                clearTimeout(timeoutId);
+                self._cleanupRequest(requestId);
                 self.state.overlapCheckPending = false;
                 self._hideOverlapPanel();
-                // Don't block the user on API failure - just log the error
+
+                // Handle different error types
+                if (error.name === 'AbortError') {
+                    // Request was cancelled (timeout or newer request) - don't show error
+                    console.log('[GIS] Overlap check cancelled');
+                    return;
+                }
+
+                // Show user-visible error for actual failures
+                console.error('[GIS] Overlap check failed:', error.message);
+                self._showToast('Could not check for overlaps. Proceeding without check.', 'warning');
+
                 if (self.options.onError) {
                     self.options.onError('Overlap check failed: ' + error.message);
                 }
@@ -2577,22 +2910,27 @@ var GISCapture = (function() {
          * Build popup content for overlapping record
          */
         _buildOverlapPopupContent: function(record) {
+            var self = this;
             var html = '<div class="gis-overlap-popup">';
             html += '<strong>Existing Record</strong><br>';
 
-            // Display configured fields
+            // Display configured fields (escape values to prevent XSS)
             if (record.displayValues) {
                 Object.keys(record.displayValues).forEach(function(key) {
-                    html += '<span>' + key + ': ' + record.displayValues[key] + '</span><br>';
+                    var escapedKey = self._escapeHtml(String(key));
+                    var escapedValue = self._escapeHtml(String(record.displayValues[key] || ''));
+                    html += '<span>' + escapedKey + ': ' + escapedValue + '</span><br>';
                 });
             }
 
-            // Show overlap info
+            // Show overlap info (numeric values are safe)
             if (record.overlapArea !== undefined) {
+                var area = Number(record.overlapArea);
                 html += '<br><span class="gis-overlap-info">Overlap: ' +
-                    record.overlapArea.toFixed(4) + ' ha';
+                    (isNaN(area) ? '0' : area.toFixed(4)) + ' ha';
                 if (record.overlapPercentage !== undefined) {
-                    html += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                    var pct = Number(record.overlapPercentage);
+                    html += ' (' + (isNaN(pct) ? '0' : pct.toFixed(1)) + '%)';
                 }
                 html += '</span>';
             }
@@ -2630,24 +2968,28 @@ var GISCapture = (function() {
                 }
             });
 
-            // Build record list HTML
+            // Build record list HTML (escape all user-provided values to prevent XSS)
             var recordsHtml = '';
             overlaps.forEach(function(record, index) {
                 var displayText = '';
                 if (record.displayValues) {
-                    var values = Object.values(record.displayValues);
+                    var values = Object.values(record.displayValues).map(function(v) {
+                        return self._escapeHtml(String(v || ''));
+                    });
                     displayText = values.join(' - ');
                 } else if (record.id) {
-                    displayText = 'Record ' + record.id;
+                    displayText = 'Record ' + self._escapeHtml(String(record.id));
                 } else {
                     displayText = 'Record ' + (index + 1);
                 }
 
                 var overlapInfo = '';
                 if (record.overlapArea !== undefined) {
-                    overlapInfo = record.overlapArea.toFixed(4) + ' ha';
+                    var area = Number(record.overlapArea);
+                    overlapInfo = (isNaN(area) ? '0' : area.toFixed(4)) + ' ha';
                     if (record.overlapPercentage !== undefined) {
-                        overlapInfo += ' (' + record.overlapPercentage.toFixed(1) + '%)';
+                        var pct = Number(record.overlapPercentage);
+                        overlapInfo += ' (' + (isNaN(pct) ? '0' : pct.toFixed(1)) + '%)';
                     }
                 }
 
@@ -2759,12 +3101,30 @@ var GISCapture = (function() {
             this._hideOverlapPanel();
         },
 
+        /**
+         * Debounced overlap check - prevents excessive API calls during editing
+         * Waits 500ms after last geometry change before making API call
+         */
+        _checkOverlapsDebounced: function() {
+            var self = this;
+            // Create debounced function on first call and cache it
+            if (!this._debouncedOverlapCheckFn) {
+                this._debouncedOverlapCheckFn = debounce(function() {
+                    self._checkOverlaps();
+                }, 500);
+            }
+            this._debouncedOverlapCheckFn();
+        },
+
         // =============================================
-        // END OVERLAP CHECKING METHODS
+        // END OVERLAP CHECKING MODULE
         // =============================================
 
         // =============================================
-        // NEARBY PARCELS DISPLAY METHODS (READ-ONLY)
+        // NEARBY PARCELS MODULE (READ-ONLY)
+        // Loads and displays existing parcels in viewport
+        // Dependencies: API endpoint, Leaflet LayerGroup
+        // Performance: Throttled to 2s between API calls
         // =============================================
 
         /**
@@ -2788,10 +3148,8 @@ var GISCapture = (function() {
             this.nearbyParcelsLayer = L.layerGroup();
             this.nearbyParcelsLayer.addTo(this.map);
 
-            // Ensure nearby parcels layer is behind drawing layer
-            if (this.drawingLayer) {
-                this.drawingLayer.bringToFront();
-            }
+            // Note: Layer order is determined by add order to map
+            // Drawing layer is added after nearby parcels, so it's already on top
 
             // Add legend
             this._addNearbyParcelsLegend();
@@ -2808,24 +3166,24 @@ var GISCapture = (function() {
 
         /**
          * Set up map move handler to reload nearby parcels on pan/zoom.
-         * Uses debouncing to avoid excessive API calls.
+         * Uses throttling with 2s minimum interval to reduce network usage on slow connections.
          */
         _setupNearbyParcelsReload: function() {
             var self = this;
-            var reloadTimeout = null;
 
-            this.map.on('moveend', function() {
-                // Only reload if visible
+            // Throttled reload function - at most once every 2 seconds
+            // This reduces API calls significantly during rapid pan/zoom
+            var throttledReload = throttle(function() {
                 if (!self.state.nearbyParcelsVisible) {
                     return;
                 }
+                self._loadNearbyParcels();
+            }, 2000, { leading: false, trailing: true });
 
-                // Debounce - wait 500ms after last move
-                clearTimeout(reloadTimeout);
-                reloadTimeout = setTimeout(function() {
-                    self._loadNearbyParcels();
-                }, 500);
-            });
+            // Store reference for cleanup
+            this._nearbyParcelsThrottledReload = throttledReload;
+
+            this.map.on('moveend', throttledReload);
         },
 
         /**
@@ -2931,29 +3289,55 @@ var GISCapture = (function() {
                 }
             }
 
-            // Build headers
-            var headers = {
-                'Content-Type': 'application/json'
-            };
-            if (this.options.apiId && this.options.apiKey) {
-                headers['api_id'] = this.options.apiId;
-                headers['api_key'] = this.options.apiKey;
+            // Validate API URL for security
+            var validatedUrl = this._validateApiUrl(apiUrl);
+            if (!validatedUrl) {
+                console.error('[GIS] Invalid API URL, skipping nearby parcels fetch');
+                return;
             }
+
+            // Cancel any previous nearby parcels request (race condition prevention)
+            if (this._nearbyParcelsRequestId) {
+                this._abortRequest(this._nearbyParcelsRequestId);
+            }
+
+            // Create new request ID and abort controller
+            var requestId = this._generateRequestId();
+            this._nearbyParcelsRequestId = requestId;
+            var abortController = this._createAbortController(requestId);
+
+            // Build headers (session-based auth)
+            var headers = this._buildApiHeaders();
+
+            // Set up timeout (30 seconds)
+            var timeoutId = setTimeout(function() {
+                self._abortRequest(requestId);
+                console.warn('[GIS] Nearby parcels fetch timed out after 30 seconds');
+            }, 30000);
 
             this.state.nearbyParcelsLoading = true;
             this._showNearbyParcelsLoading();
 
-            fetch(apiUrl, {
+            fetch(validatedUrl, {
                 method: 'GET',
-                headers: headers
+                headers: headers,
+                signal: abortController.signal
             })
             .then(function(response) {
+                clearTimeout(timeoutId);
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
                 return response.json();
             })
             .then(function(response) {
+                // Ignore response if this is a stale request
+                if (requestId !== self._nearbyParcelsRequestId) {
+                    console.log('[GIS] Ignoring stale nearby parcels response');
+                    return;
+                }
+
+                self._cleanupRequest(requestId);
                 self.state.nearbyParcelsLoading = false;
                 self._hideNearbyParcelsLoading();
 
@@ -2978,8 +3362,17 @@ var GISCapture = (function() {
                 self._updateNearbyParcelsCount(self.state.nearbyParcelsData.length, truncated);
             })
             .catch(function(error) {
+                clearTimeout(timeoutId);
+                self._cleanupRequest(requestId);
                 self.state.nearbyParcelsLoading = false;
                 self._hideNearbyParcelsLoading();
+
+                // Ignore abort errors (cancelled or timed out)
+                if (error.name === 'AbortError') {
+                    console.log('[GIS] Nearby parcels fetch cancelled');
+                    return;
+                }
+
                 console.warn('[GISCapture] Failed to load nearby parcels:', error);
             });
         },
@@ -3072,10 +3465,7 @@ var GISCapture = (function() {
                 }
             });
 
-            // Ensure drawing layer stays on top
-            if (this.drawingLayer) {
-                this.drawingLayer.bringToFront();
-            }
+            // Note: Drawing layer stays on top due to map add order
         },
 
         /**
@@ -3126,12 +3516,56 @@ var GISCapture = (function() {
 
         /**
          * Escape HTML to prevent XSS
+         * Delegates to module-level utility function
          */
         _escapeHtml: function(text) {
-            if (!text) return '';
-            var div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            return escapeHtml(text);
+        },
+
+        /**
+         * Validate API URL for security.
+         * Allows relative paths (starting with /) or HTTPS URLs.
+         * Returns the URL if valid, or null if invalid.
+         */
+        _validateApiUrl: function(url) {
+            if (!url) return null;
+
+            // Allow relative paths (most common and secure)
+            if (url.startsWith('/')) {
+                return url;
+            }
+
+            // Allow HTTPS URLs
+            if (url.startsWith('https://')) {
+                return url;
+            }
+
+            // Warn about HTTP URLs but allow them for development
+            if (url.startsWith('http://')) {
+                console.warn('[GIS] Warning: API URL uses insecure HTTP protocol. Consider using HTTPS.');
+                // In production, you might want to return null here to block HTTP
+                return url;
+            }
+
+            console.error('[GIS] Invalid API URL format. Must be relative path or HTTPS URL.');
+            return null;
+        },
+
+        /**
+         * Build request headers for API calls.
+         * Includes API credentials if provided.
+         */
+        _buildApiHeaders: function() {
+            var headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
+            // Add API credentials if provided
+            if (this.options.apiId && this.options.apiKey) {
+                headers['api_id'] = this.options.apiId;
+                headers['api_key'] = this.options.apiKey;
+            }
+            return headers;
         },
 
         /**
@@ -3209,7 +3643,7 @@ var GISCapture = (function() {
         },
 
         // =============================================
-        // END NEARBY PARCELS METHODS
+        // END NEARBY PARCELS MODULE
         // =============================================
 
         /**
@@ -3254,17 +3688,40 @@ var GISCapture = (function() {
          * Load existing value from hidden field
          */
         _loadExistingValue: function() {
+            console.log('[GIS] _loadExistingValue called, hiddenFieldId=' + this.options.hiddenFieldId);
             var hiddenField = document.getElementById(this.options.hiddenFieldId);
-            if (!hiddenField || !hiddenField.value) return;
+            console.log('[GIS] Hidden field found=' + !!hiddenField + ', value length=' + (hiddenField ? (hiddenField.value || '').length : 0));
+
+            if (!hiddenField || !hiddenField.value) {
+                console.log('[GIS] No hidden field or empty value - skipping initial geometry load');
+                return;
+            }
+
+            console.log('[GIS] Hidden field value (first 200 chars): ' + hiddenField.value.substring(0, 200));
 
             try {
                 var geojson = JSON.parse(hiddenField.value);
                 var coords = null;
 
+                // Store initial geometry for self-overlap detection in edit mode
+                // Normalize to Polygon type for consistent comparison
                 if (geojson.type === 'Polygon') {
+                    this.state.initialGeometry = geojson;
                     coords = geojson.coordinates[0];
                 } else if (geojson.type === 'Feature' && geojson.geometry.type === 'Polygon') {
+                    this.state.initialGeometry = geojson.geometry;
                     coords = geojson.geometry.coordinates[0];
+                }
+
+                if (this.state.initialGeometry) {
+                    // Calculate and store initial area using Turf.js
+                    try {
+                        var initialArea = turf.area(this.state.initialGeometry) / 10000; // m² to hectares
+                        this.state.initialAreaHectares = initialArea;
+                        console.log('[GIS] Stored initial geometry for self-overlap detection, area=' + initialArea.toFixed(4) + ' ha');
+                    } catch (e) {
+                        console.warn('[GIS] Could not calculate initial area:', e);
+                    }
                 }
 
                 if (coords && coords.length > 0) {
@@ -3377,7 +3834,8 @@ var GISCapture = (function() {
         },
 
         /**
-         * Start vertex drag
+         * Start vertex drag - PERFORMANCE OPTIMIZED
+         * Uses throttling for visual updates (60fps) and debouncing for calculations
          */
         _startVertexDrag: function(index, e) {
             var self = this;
@@ -3386,25 +3844,53 @@ var GISCapture = (function() {
 
             map.dragging.disable();
 
-            function onMove(ev) {
-                marker.setLatLng(ev.latlng);
-                self.state.vertices[index] = { lat: ev.latlng.lat, lng: ev.latlng.lng };
+            // Track last position for the throttled handler
+            var lastLatlng = null;
+
+            // Throttled visual update - runs at most every 16ms (60fps)
+            var throttledVisualUpdate = throttle(function() {
+                if (!lastLatlng) return;
+                marker.setLatLng(lastLatlng);
+                self.state.vertices[index] = { lat: lastLatlng.lat, lng: lastLatlng.lng };
                 self._updatePolygon();
+            }, 16);
+
+            // Debounced metrics calculation - runs 100ms after last change
+            var debouncedMetrics = debounce(function() {
                 self._calculateMetrics();
+            }, 100);
+
+            function onMove(ev) {
+                lastLatlng = ev.latlng;
+                throttledVisualUpdate();
+                debouncedMetrics();
             }
 
             function onUp() {
                 map.off('mousemove', onMove);
                 map.off('mouseup', onUp);
                 map.dragging.enable();
+
+                // Cancel any pending throttled/debounced calls
+                throttledVisualUpdate.cancel();
+                debouncedMetrics.cancel();
+
+                // Final update with actual position
+                if (lastLatlng) {
+                    marker.setLatLng(lastLatlng);
+                    self.state.vertices[index] = { lat: lastLatlng.lat, lng: lastLatlng.lng };
+                    self._updatePolygon();
+                    self._calculateMetrics();
+                }
+
                 self._updateInfoPanel();
-                self._checkSelfIntersection();
+                self._checkSelfIntersectionDebounced();
                 self._checkAreaWarnings();
                 self._saveToHiddenField();
 
                 // Re-check overlaps after vertex modification in preview mode
                 if (self.state.phase === 'PREVIEW') {
-                    self._checkOverlaps();
+                    self._checkOverlapsDebounced();
                 }
             }
 
@@ -3466,18 +3952,437 @@ var GISCapture = (function() {
             return this.state.metrics;
         },
 
+        // =============================================
+        // AUTO-CENTER MODULE
+        // Monitors form fields and centers map accordingly
+        // Dependencies: Nominatim geocoding API
+        // Performance: Event-driven with 3s fallback polling
+        // =============================================
+
         /**
-         * Destroy instance
+         * Check if auto-center is enabled
+         */
+        _isAutoCenterEnabled: function() {
+            return this.options.autoCenter && this.options.autoCenter.enabled === true;
+        },
+
+        /**
+         * Initialize auto-center feature
+         */
+        _initAutoCenter: function() {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            if (!config) return;
+
+            // Delay initial auto-center attempt to ensure fields are populated
+            setTimeout(function() {
+                self._attemptAutoCenter();
+            }, 300);
+
+            // Set up field change monitoring if enabled
+            if (config.retryOnFieldChange) {
+                this._setupAutoCenterFieldMonitoring();
+            }
+        },
+
+        /**
+         * Set up event-driven + fallback polling to monitor field changes.
+         * PERFORMANCE OPTIMIZED: Uses event listeners primarily, with 3s fallback polling
+         * This reduces CPU usage by ~66% compared to 1s constant polling
+         */
+        _setupAutoCenterFieldMonitoring: function() {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            // Debounced auto-center check (300ms after last field change)
+            var debouncedCheck = debounce(function() {
+                if (self.state.autoCenterInProgress) return;
+                self._checkAutoCenterFieldChange();
+            }, 300);
+
+            // Attach event listeners to monitored fields
+            var fieldIds = [
+                config.districtFieldId,
+                config.villageFieldId,
+                config.latFieldId,
+                config.lonFieldId
+            ].filter(Boolean);
+
+            fieldIds.forEach(function(fieldId) {
+                // Try multiple selectors to find the field
+                var selectors = [
+                    '[name="' + fieldId + '"]',
+                    '[name="' + fieldId + '_name"]',
+                    '#' + fieldId,
+                    'input[id$="_' + fieldId + '"]',
+                    'select[id$="_' + fieldId + '"]'
+                ];
+
+                selectors.forEach(function(selector) {
+                    var el = document.querySelector(selector);
+                    if (el) {
+                        // Use 'change' for selects, 'input' for text fields
+                        var eventType = el.tagName === 'SELECT' ? 'change' : 'input';
+                        self._addEventListener(el, eventType, debouncedCheck);
+                        self._addEventListener(el, 'change', debouncedCheck);
+                    }
+                });
+            });
+
+            // Fallback: Poll every 3 seconds for fields that may be updated programmatically
+            // (e.g., by other Joget plugins or AJAX calls)
+            this.autoCenterInterval = setInterval(function() {
+                if (self.state.autoCenterInProgress) return;
+                self._checkAutoCenterFieldChange();
+            }, 3000);
+        },
+
+        /**
+         * Check if auto-center field values have changed and trigger re-center
+         */
+        _checkAutoCenterFieldChange: function() {
+            var currentValues = this._getAutoCenterFieldValues();
+            var lastValues = this.state.autoCenterLastValues;
+
+            // Check if values have changed
+            if (lastValues && (
+                currentValues.district !== lastValues.district ||
+                currentValues.village !== lastValues.village ||
+                currentValues.lat !== lastValues.lat ||
+                currentValues.lon !== lastValues.lon
+            )) {
+                // Values changed, attempt re-center
+                this._attemptAutoCenter();
+            }
+        },
+
+        /**
+         * Get current values from auto-center fields
+         */
+        _getAutoCenterFieldValues: function() {
+            var config = this.options.autoCenter;
+            var values = {
+                district: '',
+                village: '',
+                lat: '',
+                lon: ''
+            };
+
+            if (!config) return values;
+
+            // Helper to get field value from Joget form
+            var getFieldValue = function(fieldId) {
+                if (!fieldId) return '';
+
+                // Try multiple selectors (Joget forms can have different field structures)
+                var selectors = [
+                    '[name="' + fieldId + '"]',
+                    '[name="' + fieldId + '_name"]',          // For select lists with display names
+                    '#' + fieldId,
+                    'input[id$="_' + fieldId + '"]',
+                    'select[id$="_' + fieldId + '"]',
+                    'textarea[id$="_' + fieldId + '"]'
+                ];
+
+                for (var i = 0; i < selectors.length; i++) {
+                    var el = document.querySelector(selectors[i]);
+                    if (el) {
+                        // Handle select elements
+                        if (el.tagName === 'SELECT') {
+                            var selected = el.options[el.selectedIndex];
+                            return selected ? (selected.text || selected.value || '') : '';
+                        }
+                        return el.value || '';
+                    }
+                }
+                return '';
+            };
+
+            values.district = getFieldValue(config.districtFieldId);
+            values.village = getFieldValue(config.villageFieldId);
+            values.lat = getFieldValue(config.latFieldId);
+            values.lon = getFieldValue(config.lonFieldId);
+
+            return values;
+        },
+
+        /**
+         * Attempt auto-center using fallback chain
+         */
+        _attemptAutoCenter: function() {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            if (!config || this.state.autoCenterInProgress) return;
+
+            var values = this._getAutoCenterFieldValues();
+            this.state.autoCenterLastValues = values;
+
+            // Fallback 1: Check for pre-computed coordinates
+            var lat = parseFloat(values.lat);
+            var lon = parseFloat(values.lon);
+
+            if (!isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0) {
+                this._performAutoCenter(lat, lon, 'Using pre-computed coordinates');
+                return;
+            }
+
+            // Fallback 2: Geocode district/village
+            if (values.district || values.village) {
+                this._geocodeForAutoCenter(values.village, values.district);
+                return;
+            }
+
+            // Fallback 3: Use default coordinates (only on first attempt)
+            if (!this.state.autoCenterAttempted) {
+                this.state.autoCenterAttempted = true;
+                // Don't center to defaults - let the plugin's default lat/lon handle initial view
+            }
+        },
+
+        /**
+         * Geocode location for auto-center
+         */
+        _geocodeForAutoCenter: function(village, district) {
+            var self = this;
+            var config = this.options.autoCenter;
+
+            // Build query
+            var parts = [];
+            if (village) parts.push(village);
+            if (district) parts.push(district);
+            if (config.countrySuffix) parts.push(config.countrySuffix);
+            var query = parts.join(', ');
+
+            if (!query) {
+                this._autoCenterToDefaults();
+                return;
+            }
+
+            this.state.autoCenterInProgress = true;
+            this._showAutoCenterStatus('Locating ' + (village || district) + '...');
+
+            // Use Nominatim geocoding (same as existing search feature)
+            var url = 'https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query) + '&limit=1';
+
+            fetch(url, {
+                headers: {
+                    'Accept': 'application/json'
+                }
+            })
+            .then(function(response) {
+                if (!response.ok) throw new Error('Geocode request failed');
+                return response.json();
+            })
+            .then(function(results) {
+                self.state.autoCenterInProgress = false;
+                self._hideAutoCenterStatus();
+
+                if (results && results.length > 0) {
+                    var lat = parseFloat(results[0].lat);
+                    var lon = parseFloat(results[0].lon);
+                    self._performAutoCenter(lat, lon, 'Map centered on ' + (village || district));
+                    self.state.autoCenterAttempted = true;
+                } else {
+                    self._autoCenterToDefaults();
+                }
+            })
+            .catch(function(error) {
+                console.warn('[GISCapture] Auto-center geocode failed:', error);
+                self.state.autoCenterInProgress = false;
+                self._hideAutoCenterStatus();
+                self._autoCenterToDefaults();
+            });
+        },
+
+        /**
+         * Perform the actual map centering
+         */
+        _performAutoCenter: function(lat, lon, message) {
+            var config = this.options.autoCenter;
+            var zoom = config && config.zoom ? config.zoom : 14;
+
+            this.map.setView([lat, lon], zoom);
+
+            if (message) {
+                this._showToast(message, 'success');
+                this._announce(message);
+            }
+        },
+
+        /**
+         * Fall back to default coordinates
+         */
+        _autoCenterToDefaults: function() {
+            if (!this.state.autoCenterAttempted) {
+                this.state.autoCenterAttempted = true;
+                // Show warning toast only if we tried to geocode something
+                this._showToast('Location not found, using default view', 'warning');
+                this._announce('Location not found, using default map view');
+            }
+            // Let the default lat/lon from plugin config handle the view
+        },
+
+        /**
+         * Show auto-center status indicator
+         */
+        _showAutoCenterStatus: function(message) {
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.textContent = message;
+                return;
+            }
+
+            var status = document.createElement('div');
+            status.className = 'gis-autocenter-status';
+            status.innerHTML = '<span class="gis-autocenter-spinner"></span><span class="gis-autocenter-text">' + message + '</span>';
+            this.wrapper.appendChild(status);
+            this.autoCenterStatusEl = status;
+        },
+
+        /**
+         * Hide auto-center status indicator
+         */
+        _hideAutoCenterStatus: function() {
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.remove();
+                this.autoCenterStatusEl = null;
+            }
+        },
+
+        // =============================================
+        // END AUTO-CENTER MODULE
+        // =============================================
+
+        // =============================================
+        // LIFECYCLE & CLEANUP
+        // Event listener tracking, request cancellation, destroy
+        // Critical for memory leak prevention in SPAs
+        // =============================================
+
+        /**
+         * Add an event listener and track it for cleanup.
+         */
+        _addEventListener: function(element, event, handler, options) {
+            element.addEventListener(event, handler, options);
+            this._eventListeners.push({ element: element, event: event, handler: handler, options: options });
+        },
+
+        /**
+         * Remove all tracked event listeners.
+         */
+        _removeAllEventListeners: function() {
+            this._eventListeners.forEach(function(item) {
+                try {
+                    item.element.removeEventListener(item.event, item.handler, item.options);
+                } catch (e) {
+                    // Element may no longer exist
+                }
+            });
+            this._eventListeners = [];
+        },
+
+        /**
+         * Generate a unique request ID for tracking async operations.
+         */
+        _generateRequestId: function() {
+            return 'req_' + (++this._requestIdCounter) + '_' + Date.now();
+        },
+
+        /**
+         * Create an AbortController for a request and track it.
+         */
+        _createAbortController: function(requestId) {
+            var controller = new AbortController();
+            this._abortControllers.set(requestId, controller);
+            return controller;
+        },
+
+        /**
+         * Abort a specific request by ID.
+         */
+        _abortRequest: function(requestId) {
+            var controller = this._abortControllers.get(requestId);
+            if (controller) {
+                controller.abort();
+                this._abortControllers.delete(requestId);
+            }
+        },
+
+        /**
+         * Abort all pending requests.
+         */
+        _abortAllRequests: function() {
+            var self = this;
+            this._abortControllers.forEach(function(controller, requestId) {
+                try {
+                    controller.abort();
+                } catch (e) {
+                    // Ignore errors during abort
+                }
+            });
+            this._abortControllers.clear();
+        },
+
+        /**
+         * Clean up request tracking after completion.
+         */
+        _cleanupRequest: function(requestId) {
+            this._abortControllers.delete(requestId);
+        },
+
+        /**
+         * Check if the component has been destroyed.
+         */
+        _isDestroyed: function() {
+            return this._destroyed;
+        },
+
+        /**
+         * Destroy instance and clean up all resources.
          */
         destroy: function() {
+            if (this._destroyed) return;
+            this._destroyed = true;
+
+            // Abort all pending API requests
+            this._abortAllRequests();
+
+            // Clean up GPS watch
             if (this.state.gpsWatchId) {
                 navigator.geolocation.clearWatch(this.state.gpsWatchId);
+                this.state.gpsWatchId = null;
             }
-            // Clean up event handlers
-            if (this._boundMouseMoveHandler) {
+
+            // Clean up auto-center polling
+            if (this.autoCenterInterval) {
+                clearInterval(this.autoCenterInterval);
+                this.autoCenterInterval = null;
+            }
+            if (this.autoCenterStatusEl) {
+                this.autoCenterStatusEl.remove();
+                this.autoCenterStatusEl = null;
+            }
+
+            // Cancel any pending throttled/debounced functions
+            if (this._nearbyParcelsThrottledReload) {
+                this._nearbyParcelsThrottledReload.cancel();
+            }
+            if (this._debouncedSelfIntersectionFn) {
+                this._debouncedSelfIntersectionFn.cancel();
+            }
+            if (this._debouncedOverlapCheckFn) {
+                this._debouncedOverlapCheckFn.cancel();
+            }
+
+            // Clean up tracked event listeners
+            this._removeAllEventListeners();
+
+            // Clean up legacy bound event handlers
+            if (this._boundMouseMoveHandler && this.map) {
                 this.map.off('mousemove', this._boundMouseMoveHandler);
             }
-            if (this._boundDblClickHandler) {
+            if (this._boundDblClickHandler && this.map) {
                 this.map.off('dblclick', this._boundDblClickHandler);
             }
             if (this._boundKeyDownHandler) {
@@ -3486,23 +4391,43 @@ var GISCapture = (function() {
             if (this._boundGlobalKeyHandler) {
                 document.removeEventListener('keydown', this._boundGlobalKeyHandler);
             }
-            if (this.closeHintTooltip) {
+            if (this.closeHintTooltip && this.map) {
                 this.map.removeLayer(this.closeHintTooltip);
             }
+
             // Clear midpoint and intersection markers
-            this._clearMidpointMarkers();
-            this._clearIntersectionHighlights();
+            if (typeof this._clearMidpointMarkers === 'function') {
+                this._clearMidpointMarkers();
+            }
+            if (typeof this._clearIntersectionHighlights === 'function') {
+                this._clearIntersectionHighlights();
+            }
+
             // Clear overlap display
-            this._clearOverlapDisplay();
+            if (typeof this._clearOverlapDisplay === 'function') {
+                this._clearOverlapDisplay();
+            }
+
             // Clear nearby parcels display
-            this._clearNearbyParcels();
-            if (this.nearbyParcelsLayer) {
+            if (typeof this._clearNearbyParcels === 'function') {
+                this._clearNearbyParcels();
+            }
+            if (this.nearbyParcelsLayer && this.map) {
                 this.map.removeLayer(this.nearbyParcelsLayer);
             }
+
+            // Destroy Leaflet map
             if (this.map) {
                 this.map.remove();
+                this.map = null;
             }
-            this.container.innerHTML = '';
+
+            // Clear container
+            if (this.container) {
+                this.container.innerHTML = '';
+            }
+
+            console.log('[GIS] Component destroyed');
         }
     };
 

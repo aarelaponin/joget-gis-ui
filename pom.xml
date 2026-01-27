@@ -88,6 +88,11 @@
                     <groupId>javax.servlet</groupId>
                     <artifactId>javax.servlet-api</artifactId>
                 </exclusion>
+                <!-- Exclude org.json to avoid version conflicts with our tests -->
+                <exclusion>
+                    <groupId>org.json</groupId>
+                    <artifactId>json</artifactId>
+                </exclusion>
             </exclusions>
             <scope>provided</scope>
         </dependency>
@@ -100,12 +105,33 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- JSON - provided by wflow-core -->
+        <!-- JSON - included for compile/test, excluded from bundle (provided by wflow-core at runtime) -->
         <dependency>
             <groupId>org.json</groupId>
             <artifactId>json</artifactId>
             <version>20230227</version>
-            <scope>provided</scope>
+            <scope>compile</scope>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Test dependencies -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.5.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.5.0</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

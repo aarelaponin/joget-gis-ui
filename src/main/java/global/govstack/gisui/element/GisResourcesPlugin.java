@@ -1,6 +1,5 @@
 package global.govstack.gisui.element;
 
-import org.joget.apps.app.service.AppUtil;
 import org.joget.commons.util.LogUtil;
 import org.joget.plugin.base.ExtDefaultPlugin;
 import org.joget.plugin.base.PluginWebSupport;
@@ -12,6 +11,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * GIS Resources Plugin
@@ -24,6 +28,12 @@ import java.net.URL;
 public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSupport {
 
     private static final String CLASS_NAME = GisResourcesPlugin.class.getName();
+
+    // Whitelist of allowed file extensions for security
+    private static final Set<String> ALLOWED_EXTENSIONS = new HashSet<>(Arrays.asList(
+        ".js", ".css", ".json", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+        ".woff", ".woff2", ".ttf", ".eot", ".ico"
+    ));
 
     @Override
     public String getName() {
@@ -51,16 +61,37 @@ public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSup
             return;
         }
 
-        // Security: prevent directory traversal
-        if (file.contains("..") || file.contains("/") || file.contains("\\")) {
+        // URL decode to catch encoded traversal attempts (e.g., %2e%2e)
+        String decodedFile;
+        try {
+            decodedFile = URLDecoder.decode(file, StandardCharsets.UTF_8.name());
+        } catch (Exception e) {
+            LogUtil.warn(CLASS_NAME, "Failed to decode file parameter: " + file);
+            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Invalid file parameter");
+            return;
+        }
+
+        // Security: prevent directory traversal (check both original and decoded)
+        if (containsTraversalPattern(file) || containsTraversalPattern(decodedFile)) {
             LogUtil.warn(CLASS_NAME, "Blocked potential directory traversal: " + file);
             response.sendError(HttpServletResponse.SC_FORBIDDEN, "Invalid file path");
             return;
         }
 
+        // Security: whitelist allowed file extensions
+        if (!hasAllowedExtension(decodedFile)) {
+            LogUtil.warn(CLASS_NAME, "Blocked disallowed file extension: " + file);
+            response.sendError(HttpServletResponse.SC_FORBIDDEN, "File type not allowed");
+            return;
+        }
+
         // Determine content type
-        String contentType = getContentType(file);
+        String contentType = getContentType(decodedFile);
         response.setContentType(contentType);
+
+        // Set security headers
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("X-Frame-Options", "SAMEORIGIN");
 
         // Set caching headers (1 year for versioned resources)
         String version = request.getParameter("v");
@@ -71,7 +102,7 @@ public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSup
         }
 
         // Load from classpath
-        String resourcePath = "/static/" + file;
+        String resourcePath = "/static/" + decodedFile;
         try {
             URL resourceUrl = getClass().getResource(resourcePath);
             if (resourceUrl == null) {
@@ -82,7 +113,7 @@ public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSup
 
             try (InputStream in = resourceUrl.openStream();
                  OutputStream out = response.getOutputStream()) {
-                
+
                 byte[] buffer = new byte[8192];
                 int bytesRead;
                 while ((bytesRead = in.read(buffer)) != -1) {
@@ -95,6 +126,27 @@ public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSup
             LogUtil.error(CLASS_NAME, e, "Error serving resource: " + file);
             response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Error loading resource");
         }
+    }
+
+    /**
+     * Check if the file path contains directory traversal patterns.
+     */
+    private boolean containsTraversalPattern(String path) {
+        return path.contains("..") || path.contains("/") || path.contains("\\") ||
+               path.contains("%2e") || path.contains("%2f") || path.contains("%5c");
+    }
+
+    /**
+     * Check if the file has an allowed extension.
+     */
+    private boolean hasAllowedExtension(String filename) {
+        String lower = filename.toLowerCase();
+        for (String ext : ALLOWED_EXTENSIONS) {
+            if (lower.endsWith(ext)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

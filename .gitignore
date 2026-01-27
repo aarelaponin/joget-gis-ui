@@ -38,3 +38,6 @@ test-screenshots/
 
 # Logs
 *.log
+
+# Build artifacts in docs
+docs/*.jar

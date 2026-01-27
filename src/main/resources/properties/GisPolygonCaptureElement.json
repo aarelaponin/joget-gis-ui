@@ -338,6 +338,73 @@
         ]
     },
     {
+        "title": "Auto-Center Settings",
+        "properties": [
+            {
+                "name": "enableAutoCenter",
+                "label": "Enable Auto-Center",
+                "description": "Automatically center map based on district/village fields",
+                "type": "checkbox",
+                "options": [
+                    {"value": "true", "label": ""}
+                ],
+                "value": ""
+            },
+            {
+                "name": "autoCenterDistrictFieldId",
+                "label": "District Field ID",
+                "description": "Form field ID containing district value (e.g., district)",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "autoCenterVillageFieldId",
+                "label": "Village Field ID",
+                "description": "Form field ID containing village value (e.g., village)",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "autoCenterLatFieldId",
+                "label": "Latitude Field ID",
+                "description": "Optional: Form field with pre-computed latitude (skips geocoding if populated)",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "autoCenterLonFieldId",
+                "label": "Longitude Field ID",
+                "description": "Optional: Form field with pre-computed longitude (skips geocoding if populated)",
+                "type": "textfield",
+                "value": ""
+            },
+            {
+                "name": "autoCenterCountrySuffix",
+                "label": "Country Suffix",
+                "description": "Appended to geocode query for accuracy (e.g., Lesotho)",
+                "type": "textfield",
+                "value": "Lesotho"
+            },
+            {
+                "name": "autoCenterZoom",
+                "label": "Auto-Center Zoom Level",
+                "description": "Zoom level after auto-centering (1-18)",
+                "type": "textfield",
+                "value": "14"
+            },
+            {
+                "name": "autoCenterRetryOnFieldChange",
+                "label": "Re-center on Field Change",
+                "description": "Monitor fields and re-center if values change",
+                "type": "checkbox",
+                "options": [
+                    {"value": "true", "label": ""}
+                ],
+                "value": "true"
+            }
+        ]
+    },
+    {
         "title": "Appearance",
         "properties": [
             {
