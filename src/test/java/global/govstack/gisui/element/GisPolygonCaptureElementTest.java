@@ -369,44 +369,44 @@ class GisPolygonCaptureElementTest {
     }
 
     @Nested
-    @DisplayName("UUID Extraction")
+    @DisplayName("UUID Extraction (RecordIdExtractor)")
     class UUIDExtractionTests {
 
         @Test
         @DisplayName("Standard UUID should be extracted")
-        void standardUUID() throws Exception {
+        void standardUUID() {
             String input = "12345678-1234-1234-1234-123456789abc";
-            String result = invokeExtractUUID(input);
+            String result = RecordIdExtractor.extractUUID(input);
             assertEquals(input, result);
         }
 
         @Test
         @DisplayName("UUID from malformed parameter should be extracted")
-        void malformedParameter() throws Exception {
+        void malformedParameter() {
             String input = "12345678-1234-1234-1234-123456789abc_mode=edit";
-            String result = invokeExtractUUID(input);
+            String result = RecordIdExtractor.extractUUID(input);
             assertEquals("12345678-1234-1234-1234-123456789abc", result);
         }
 
         @Test
         @DisplayName("Non-UUID string should be returned as-is")
-        void nonUUID() throws Exception {
+        void nonUUID() {
             String input = "12345";
-            String result = invokeExtractUUID(input);
+            String result = RecordIdExtractor.extractUUID(input);
             assertEquals("12345", result);
         }
 
         @Test
         @DisplayName("Empty string should return empty")
-        void emptyString() throws Exception {
-            String result = invokeExtractUUID("");
+        void emptyString() {
+            String result = RecordIdExtractor.extractUUID("");
             assertEquals("", result);
         }
 
         @Test
         @DisplayName("Null should return empty")
-        void nullValue() throws Exception {
-            String result = invokeExtractUUID(null);
+        void nullValue() {
+            String result = RecordIdExtractor.extractUUID(null);
             assertEquals("", result);
         }
     }
@@ -443,11 +443,5 @@ class GisPolygonCaptureElementTest {
         Method method = GisPolygonCaptureElement.class.getDeclaredMethod("getPropertyWithDefault", String.class, String.class);
         method.setAccessible(true);
         return (String) method.invoke(element, value, defaultValue);
-    }
-
-    private String invokeExtractUUID(String input) throws Exception {
-        Method method = GisPolygonCaptureElement.class.getDeclaredMethod("extractUUID", String.class);
-        method.setAccessible(true);
-        return (String) method.invoke(element, input);
     }
 }

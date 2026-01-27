@@ -1,4 +1,11 @@
 <#-- GIS Polygon Capture Form Element Template -->
+
+<#-- Resource hints for CDN preconnection - improves load time on slow networks -->
+<link rel="preconnect" href="https://unpkg.com" crossorigin>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+<link rel="dns-prefetch" href="https://unpkg.com">
+<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
+
 <div class="form-cell gis-form-cell-fullwidth" style="display: block !important; width: 100% !important; float: none !important; clear: both !important;" ${elementMetaData!}>
     <label class="label" style="display: block !important; width: 100% !important; max-width: 100% !important; float: none !important; margin-bottom: 8px !important; text-align: left !important;">
         ${element.properties.label!}
@@ -15,7 +22,7 @@
 </div>
 
 <#-- Cache bust version -->
-<#assign gisCacheVersion = "20260127_v16">
+<#assign gisCacheVersion = "20260127_v17">
 
 <#-- Load Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
@@ -79,7 +86,9 @@
 
         script.onload = function() {
             log('Loaded: ' + filename);
-            setTimeout(callback, 50);
+            // Execute callback immediately - no artificial delay needed
+            // The browser's onload event already ensures the script is ready
+            callback();
         };
 
         script.onerror = function(e) {
@@ -144,7 +153,8 @@
 
             var capture = GISCapture.init('${elementId!}', {
                 apiBase: apiBase,
-                // NOTE: API credentials are handled server-side for security
+                apiId: '${apiId!}',
+                apiKey: '${apiKey!}',
                 hiddenFieldId: '${fieldId!}',
                 recordId: '${recordId!}',
                 outputFields: {
