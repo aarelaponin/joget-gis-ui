@@ -24,7 +24,7 @@
 <#-- Cache bust version - use Java value if provided, otherwise fallback -->
 <#if gisCacheVersion?? && gisCacheVersion?has_content>
 <#else>
-<#assign gisCacheVersion = "20260128_v5">
+<#assign gisCacheVersion = "20260128_v6">
 </#if>
 
 <#-- Load Leaflet CSS -->

@@ -81,17 +81,24 @@ resources/
 
 ### Self-Overlap Filtering (IMPORTANT - DO NOT BREAK)
 
-When editing an existing parcel, the overlap detection API returns the original parcel as an "overlap" (because the modified geometry intersects with the stored geometry). The client-side code filters these out using three strategies:
+When editing an existing parcel, the overlap detection API returns the original parcel as an "overlap" (because the modified geometry intersects with the stored geometry). The client-side code filters these out using **five strategies**:
 
 1. **Strategy 1 (Shrunk)**: Polygon area decreased, 95%+ overlap → filter out
 2. **Strategy 2 (Same-size)**: 99%+ overlap, area ≈ current area → filter out
 3. **Strategy 3 (Expanded)**: Area increased, `turf.booleanContains()` confirms expanded polygon contains original → filter out
+4. **Strategy 4 (Shifted)**: Overlap geometry is 95%+ contained within initial geometry → filter out (catches cases where polygon is moved/reshaped)
+5. **Strategy 5 (Fallback)**: Overlap area ≈ initial area within 15% → filter out
 
-**Location**: `gis-capture.js` lines ~2940-3020
+**Location**: `gis-capture.js` lines 3017-3160
 
 **Full documentation**: `docs/self-overlap-filtering.md`
 
-**Before modifying overlap-related code**, read the documentation and test all three scenarios (shrink, same-size, expand) to ensure self-overlaps are filtered while legitimate overlaps with other parcels are still detected.
+**Before modifying overlap-related code**, read the documentation and test ALL scenarios:
+- Shrink (drag inward)
+- Same-size (minor adjustments)
+- Expand (drag outward)
+- **Shift** (expand one side, shrink another - this was a bug case)
+- Legitimate overlap with different parcel (must still show warning)
 
 ### Self-Intersection Detection
 

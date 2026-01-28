@@ -1609,3 +1609,61 @@
 .gis-autocenter-text {
     font-weight: 500;
 }
+
+/* =====================================================
+   NETWORK STATUS INDICATOR
+   ===================================================== */
+
+.gis-network-status {
+    position: absolute;
+    top: 120px;
+    left: 10px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: white;
+    border-radius: 4px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.gis-network-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.gis-network-status.online .gis-network-indicator {
+    background: #28a745;
+}
+
+.gis-network-status.online .gis-network-label {
+    color: #28a745;
+}
+
+.gis-network-status.offline {
+    background: #fff3f3;
+    border: 1px solid #dc3545;
+}
+
+.gis-network-status.offline .gis-network-indicator {
+    background: #dc3545;
+    animation: pulse 1.5s infinite;
+}
+
+.gis-network-status.offline .gis-network-label {
+    color: #dc3545;
+}
+
+@media (max-width: 768px) {
+    .gis-network-status {
+        top: 110px;
+        padding: 5px 8px;
+        font-size: 11px;
+    }
+}

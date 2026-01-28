@@ -70,6 +70,10 @@ public class GisConfigBuilder {
     public static final String DEFAULT_COUNTRY_SUFFIX = "Lesotho";
     public static final int DEFAULT_AUTO_CENTER_ZOOM = 14;
 
+    // Simplification defaults
+    public static final boolean DEFAULT_SIMPLIFICATION_ENABLED = false;
+    public static final double DEFAULT_SIMPLIFICATION_TOLERANCE = 2.0;
+
     // =========================================================================
     // BUILDER STATE
     // =========================================================================
@@ -83,6 +87,7 @@ public class GisConfigBuilder {
     private JSONObject overlap;
     private JSONObject nearbyParcels;
     private JSONObject autoCenter;
+    private JSONObject simplification;
 
     /**
      * Create a new config builder with default values.
@@ -354,6 +359,27 @@ public class GisConfigBuilder {
     }
 
     // =========================================================================
+    // SIMPLIFICATION
+    // =========================================================================
+
+    /**
+     * Enable and configure polygon simplification.
+     *
+     * @param enabled Whether simplification is enabled
+     * @param tolerance Simplification tolerance in meters (higher = fewer vertices)
+     */
+    public GisConfigBuilder withSimplification(boolean enabled, double tolerance) {
+        try {
+            simplification = new JSONObject();
+            simplification.put("enabled", enabled);
+            simplification.put("tolerance", tolerance > 0 ? tolerance : DEFAULT_SIMPLIFICATION_TOLERANCE);
+        } catch (Exception e) {
+            LogUtil.error(CLASS_NAME, e, "Error setting simplification config");
+        }
+        return this;
+    }
+
+    // =========================================================================
     // BUILD
     // =========================================================================
 
@@ -377,6 +403,9 @@ public class GisConfigBuilder {
             }
             if (autoCenter != null) {
                 config.put("autoCenter", autoCenter);
+            }
+            if (simplification != null) {
+                config.put("simplification", simplification);
             }
 
             return config.toString();
@@ -405,6 +434,9 @@ public class GisConfigBuilder {
             }
             if (autoCenter != null) {
                 config.put("autoCenter", autoCenter);
+            }
+            if (simplification != null) {
+                config.put("simplification", simplification);
             }
         } catch (Exception e) {
             LogUtil.error(CLASS_NAME, e, "Error converting to JSONObject");

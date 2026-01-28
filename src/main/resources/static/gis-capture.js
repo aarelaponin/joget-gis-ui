@@ -1,4 +1,4 @@
-console.log('=== GIS-CAPTURE.JS LOADED - BUILD 2026-01-28-v5 (GIS_DEBUG) ===');
+console.log('=== GIS-CAPTURE.JS LOADED - BUILD 2026-01-28-v6 (GIS_DEBUG) ===');
 /**
  * GIS Polygon Capture Component
  *
@@ -232,6 +232,11 @@ var GISCapture = (function() {
             nearbyParcels: null,
             // Auto-center configuration
             autoCenter: null,
+            // Simplification configuration
+            simplification: {
+                enabled: false,
+                tolerance: 2
+            },
             onGeometryChange: null,
             onValidationError: null,
             onError: null
@@ -267,7 +272,9 @@ var GISCapture = (function() {
             autoCenterInProgress: false,
             // Initial geometry for self-overlap detection
             initialGeometry: null,        // Stores the originally loaded GeoJSON for edit mode
-            initialAreaHectares: null     // Stores the initial area for self-overlap detection
+            initialAreaHectares: null,    // Stores the initial area for self-overlap detection
+            // Network status
+            isOnline: navigator.onLine !== false
         };
 
         // Map references
@@ -296,6 +303,9 @@ var GISCapture = (function() {
         // Auto-center references
         this.autoCenterInterval = null;    // Polling interval for field changes
         this.autoCenterStatusEl = null;    // Status indicator element
+
+        // Network status references
+        this.networkStatusEl = null;       // Network status indicator element
 
         // Accessibility
         this.liveRegion = null;        // ARIA live region for announcements
@@ -420,6 +430,9 @@ var GISCapture = (function() {
 
             // Initialize accessibility features
             this._initAccessibility();
+
+            // Initialize network status indicator
+            this._initNetworkStatus();
         },
 
         /**
@@ -563,6 +576,51 @@ var GISCapture = (function() {
             this.mapContainer.setAttribute('tabindex', '0');
             this.mapContainer.setAttribute('role', 'img');
             this.mapContainer.setAttribute('aria-label', 'Interactive map for capturing polygon boundaries. Use arrow keys to pan, plus and minus to zoom.');
+        },
+
+        /**
+         * Initialize network status indicator
+         */
+        _initNetworkStatus: function() {
+            var self = this;
+
+            this.networkStatusEl = document.createElement('div');
+            this.networkStatusEl.className = 'gis-network-status ' + (this.state.isOnline ? 'online' : 'offline');
+            this.networkStatusEl.setAttribute('role', 'status');
+            this.networkStatusEl.setAttribute('aria-live', 'polite');
+            this.networkStatusEl.innerHTML =
+                '<span class="gis-network-indicator"></span>' +
+                '<span class="gis-network-label">' + (this.state.isOnline ? 'Online' : 'Offline') + '</span>';
+
+            this.wrapper.appendChild(this.networkStatusEl);
+
+            var onOnline = function() {
+                self.state.isOnline = true;
+                self._updateNetworkStatus();
+                self._showToast('Connection restored', 'success');
+            };
+
+            var onOffline = function() {
+                self.state.isOnline = false;
+                self._updateNetworkStatus();
+                self._showToast('No internet connection', 'warning');
+            };
+
+            window.addEventListener('online', onOnline);
+            window.addEventListener('offline', onOffline);
+
+            this._eventListeners.push({ element: window, event: 'online', handler: onOnline });
+            this._eventListeners.push({ element: window, event: 'offline', handler: onOffline });
+        },
+
+        /**
+         * Update network status display
+         */
+        _updateNetworkStatus: function() {
+            if (!this.networkStatusEl) return;
+
+            this.networkStatusEl.className = 'gis-network-status ' + (this.state.isOnline ? 'online' : 'offline');
+            this.networkStatusEl.querySelector('.gis-network-label').textContent = this.state.isOnline ? 'Online' : 'Offline';
         },
 
         /**
@@ -1506,6 +1564,17 @@ var GISCapture = (function() {
                 e.preventDefault();
                 e.stopPropagation();
                 if (self.state.currentPosition) {
+                    // Check if GPS accuracy meets threshold before allowing marking
+                    var minAccuracy = self.options.gps.minAccuracy || 10;
+                    if (self.state.gpsAccuracy !== null && self.state.gpsAccuracy > minAccuracy) {
+                        self._showToast(
+                            'GPS accuracy (' + Math.round(self.state.gpsAccuracy) + 'm) exceeds limit (' + minAccuracy + 'm). Wait for better signal.',
+                            'warning'
+                        );
+                        self._announce('Cannot mark corner. GPS accuracy ' + Math.round(self.state.gpsAccuracy) + 'm exceeds ' + minAccuracy + 'm threshold.');
+                        return; // Block marking
+                    }
+
                     // Track GPS accuracy for this vertex
                     if (self.state.gpsAccuracy !== null) {
                         self.state.gpsAccuracyValues.push(self.state.gpsAccuracy);
@@ -3014,6 +3083,67 @@ var GISCapture = (function() {
                                 }
                             }
 
+                            // Strategy 4: SHIFTED polygon - compare overlap geometry to initial geometry
+                            // This handles cases where polygon was moved/reshaped (some parts expanded, some shrunk)
+                            // If the overlap geometry is essentially the same as our initial geometry, filter it
+                            if (isEditMode && self.state.initialGeometry && overlap.geometry) {
+                                try {
+                                    var initialGeojson = self.state.initialGeometry;
+                                    var overlapGeojson = overlap.geometry;
+
+                                    // Compute intersection of overlap geometry with initial geometry
+                                    var intersection = turf.intersect(
+                                        turf.feature(overlapGeojson),
+                                        turf.feature(initialGeojson)
+                                    );
+
+                                    if (intersection) {
+                                        var intersectionArea = turf.area(intersection) / 10000; // m² to ha
+                                        var overlapGeoArea = turf.area(overlapGeojson) / 10000;
+
+                                        // If intersection covers most of both the overlap and initial geometries,
+                                        // the overlap IS our initial geometry (or very close to it)
+                                        var intersectionOfOverlap = intersectionArea / overlapGeoArea;
+                                        var intersectionOfInitial = intersectionArea / initialArea;
+
+                                        console.log('[GIS] Strategy 4 check: intersection=' + intersectionArea.toFixed(4) +
+                                            ' ha, overlapGeo=' + overlapGeoArea.toFixed(4) + ' ha, initial=' + initialArea.toFixed(4) +
+                                            ' ha, coverage: ' + (intersectionOfOverlap * 100).toFixed(1) + '% of overlap, ' +
+                                            (intersectionOfInitial * 100).toFixed(1) + '% of initial');
+
+                                        // Filter if EITHER condition is met:
+                                        // 1. Both coverages >= 85% (geometries are essentially the same)
+                                        // 2. Overlap is 95%+ contained in initial (overlap IS a subset of our parcel)
+                                        // Condition 2 is key: if the overlap geometry is entirely inside our initial,
+                                        // it's definitely our own parcel being detected, not a different parcel
+                                        if (intersectionOfOverlap >= 0.85 && intersectionOfInitial >= 0.85) {
+                                            console.log('[GIS] Self-overlap filter: overlap geometry matches initial geometry ' +
+                                                '(>85% mutual coverage), filtering out');
+                                            return false;
+                                        }
+                                        if (intersectionOfOverlap >= 0.95) {
+                                            console.log('[GIS] Self-overlap filter: overlap geometry is 95%+ contained within ' +
+                                                'initial geometry (overlap IS our parcel), filtering out');
+                                            return false;
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn('[GIS] Strategy 4 (shifted polygon) check failed:', e);
+                                }
+                            }
+
+                            // Strategy 5: Fallback - high overlap with initial area similarity
+                            // If overlap area is very close to initial area (within 15%), likely self-overlap
+                            if (isEditMode && initialArea) {
+                                var areaDiffFromInitial = Math.abs(overlap.overlapArea - initialArea);
+                                var initialThreshold = initialArea * 0.15; // 15% tolerance
+                                if (areaDiffFromInitial <= initialThreshold) {
+                                    console.log('[GIS] Self-overlap filter: overlap area (' + overlap.overlapArea.toFixed(4) +
+                                        ' ha) ≈ initial area (' + initialArea.toFixed(4) + ' ha) within 15%, filtering out');
+                                    return false;
+                                }
+                            }
+
                             return true; // Keep this overlap
                         });
 
@@ -3863,7 +3993,12 @@ var GISCapture = (function() {
         _saveToHiddenField: function() {
             var hiddenField = document.getElementById(this.options.hiddenFieldId);
             if (hiddenField) {
-                hiddenField.value = JSON.stringify(this._toGeoJSON());
+                var geojson = this._toGeoJSON();
+                // Apply simplification if enabled
+                if (this.options.simplification && this.options.simplification.enabled) {
+                    geojson = this._simplifyPolygon(geojson);
+                }
+                hiddenField.value = JSON.stringify(geojson);
             }
 
             // Update output fields
@@ -3971,6 +4106,46 @@ var GISCapture = (function() {
                 type: 'Polygon',
                 coordinates: [coords]
             };
+        },
+
+        /**
+         * Simplify polygon using Turf.js
+         * Reduces vertex count while preserving shape and accuracy.
+         *
+         * @param {Object} geojson - GeoJSON Polygon to simplify
+         * @returns {Object} Simplified GeoJSON or original if simplification disabled/fails
+         */
+        _simplifyPolygon: function(geojson) {
+            if (!geojson || !this.options.simplification || !this.options.simplification.enabled) {
+                return geojson;
+            }
+
+            try {
+                var tolerance = this.options.simplification.tolerance || 2;
+                // Convert meters to approximate degrees (1 degree ≈ 111km at equator)
+                var toleranceDegrees = tolerance / 111000;
+
+                var simplified = turf.simplify(geojson, {
+                    tolerance: toleranceDegrees,
+                    highQuality: true
+                });
+
+                // SAFEGUARD: Check simplified polygon doesn't have self-intersections
+                var kinks = turf.kinks(simplified);
+                if (kinks.features.length > 0) {
+                    console.warn('[GIS] Simplification introduced self-intersection, using original');
+                    return geojson;
+                }
+
+                var originalVerts = geojson.coordinates[0].length - 1;
+                var simplifiedVerts = simplified.coordinates[0].length - 1;
+                console.log('[GIS] Simplified: ' + originalVerts + ' -> ' + simplifiedVerts + ' vertices');
+
+                return simplified;
+            } catch (e) {
+                console.warn('[GIS] Simplification failed:', e);
+                return geojson;
+            }
         },
 
         /**

@@ -338,6 +338,28 @@
         ]
     },
     {
+        "title": "Simplification Settings",
+        "properties": [
+            {
+                "name": "enableSimplification",
+                "label": "Enable Polygon Simplification",
+                "description": "Reduce vertex count for GPS-captured boundaries",
+                "type": "checkbox",
+                "options": [
+                    {"value": "true", "label": ""}
+                ],
+                "value": ""
+            },
+            {
+                "name": "simplificationTolerance",
+                "label": "Simplification Tolerance (meters)",
+                "description": "Higher = fewer vertices. Recommended: 2m for GPS",
+                "type": "textfield",
+                "value": "2"
+            }
+        ]
+    },
+    {
         "title": "Auto-Center Settings",
         "properties": [
             {

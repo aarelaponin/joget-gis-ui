@@ -332,6 +332,14 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
             );
         }
 
+        // Simplification (optional)
+        if ("true".equals(getPropertyString("enableSimplification"))) {
+            builder.withSimplification(
+                true,
+                parseDoubleSafe(getPropertyString("simplificationTolerance"), GisConfigBuilder.DEFAULT_SIMPLIFICATION_TOLERANCE)
+            );
+        }
+
         return builder.build();
     }
 
