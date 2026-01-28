@@ -21,8 +21,11 @@
     <div class="form-clear"></div>
 </div>
 
-<#-- Cache bust version -->
-<#assign gisCacheVersion = "20260127_v17">
+<#-- Cache bust version - use Java value if provided, otherwise fallback -->
+<#if gisCacheVersion?? && gisCacheVersion?has_content>
+<#else>
+<#assign gisCacheVersion = "20260128_v5">
+</#if>
 
 <#-- Load Leaflet CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
@@ -203,7 +206,7 @@
     var cacheVersion = '${gisCacheVersion}';
     log('Resource base: ' + resourceBase + ', version: ' + cacheVersion);
 
-    // Load scripts in sequence: Leaflet -> Turf -> GIS Capture -> Init
+    // Load scripts in sequence: Leaflet -> Turf -> Sweepline -> GIS Capture -> Init
     // Each has a fallback CDN in case the primary CDN is unavailable
     loadScript(
         'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
@@ -227,15 +230,25 @@
                         return;
                     }
 
-                    loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
-                        log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+                    // Load sweepline-intersections for robust self-intersection detection fallback
+                    // Using jsDelivr CDN (more reliable than unpkg for MIME types)
+                    loadScript(
+                        'https://cdn.jsdelivr.net/npm/sweepline-intersections@2.0.1/dist/sweeplineIntersections.min.js',
+                        function() {
+                            log('Sweepline loaded, typeof sweeplineIntersections = ' + typeof sweeplineIntersections);
+                            // Note: sweepline is optional - continue even if it fails to load
 
-                        if (document.readyState === 'complete') {
-                            initMap();
-                        } else {
-                            window.addEventListener('load', initMap);
+                            loadScript(resourceBase + 'gis-capture.js&v=' + cacheVersion, function() {
+                                log('GIS Capture loaded, typeof GISCapture = ' + typeof GISCapture);
+
+                                if (document.readyState === 'complete') {
+                                    initMap();
+                                } else {
+                                    window.addEventListener('load', initMap);
+                                }
+                            });
                         }
-                    });
+                    );
                 },
                 // Fallback CDN for Turf.js
                 'https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js'

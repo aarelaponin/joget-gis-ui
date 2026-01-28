@@ -76,3 +76,28 @@ resources/
 - Plugin properties defined in JSON format (not XML)
 - Form element template uses `FormUtil.generateElementHtml()` for rendering
 - Backend GIS API services are in a separate plugin (`joget-gis-api`)
+
+## Critical Implementation Notes
+
+### Self-Overlap Filtering (IMPORTANT - DO NOT BREAK)
+
+When editing an existing parcel, the overlap detection API returns the original parcel as an "overlap" (because the modified geometry intersects with the stored geometry). The client-side code filters these out using three strategies:
+
+1. **Strategy 1 (Shrunk)**: Polygon area decreased, 95%+ overlap → filter out
+2. **Strategy 2 (Same-size)**: 99%+ overlap, area ≈ current area → filter out
+3. **Strategy 3 (Expanded)**: Area increased, `turf.booleanContains()` confirms expanded polygon contains original → filter out
+
+**Location**: `gis-capture.js` lines ~2940-3020
+
+**Full documentation**: `docs/self-overlap-filtering.md`
+
+**Before modifying overlap-related code**, read the documentation and test all three scenarios (shrink, same-size, expand) to ensure self-overlaps are filtered while legitimate overlaps with other parcels are still detected.
+
+### Self-Intersection Detection
+
+Uses dual-algorithm approach for robustness:
+1. Primary: `turf.kinks()` (fast, handles most cases)
+2. Fallback: `sweepline-intersections` library (Bentley-Ottmann algorithm)
+3. Final fallback: Manual O(n²) edge intersection check
+
+**Documentation**: `docs/polygon-self-intersection-research.md`

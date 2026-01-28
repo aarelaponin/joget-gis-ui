@@ -1,3 +1,4 @@
+console.log('=== GIS-CAPTURE.JS LOADED - BUILD 2026-01-28-v5 (GIS_DEBUG) ===');
 /**
  * GIS Polygon Capture Component
  *
@@ -326,6 +327,9 @@ var GISCapture = (function() {
         _init: function() {
             var self = this;
 
+            // Run self-test to verify intersection algorithm
+            this._testSelfIntersection();
+
             // Debug: log recordId received from server
             console.log('[GIS] RecordId from server: "' + (this.options.recordId || '') + '"');
 
@@ -363,6 +367,9 @@ var GISCapture = (function() {
             if (this._isAutoCenterEnabled()) {
                 this._initAutoCenter();
             }
+
+            // Store instance reference for debug access
+            window._gisInstance = this;
         },
 
         /**
@@ -1909,46 +1916,194 @@ var GISCapture = (function() {
         // =============================================
 
         /**
-         * Check for self-intersection and highlight crossing edges
+         * Check for self-intersection using turf.kinks() with sweepline-intersections fallback
+         * Uses multiple algorithms to ensure reliable detection during real-time editing
          */
         _checkSelfIntersection: function() {
-            var self = this;
             this._clearIntersectionHighlights();
 
-            if (this.state.vertices.length < 4) {
+            // Need at least 3 vertices to form a polygon
+            if (this.state.vertices.length < 3) {
                 this._hideWarning('intersection');
                 return false;
             }
 
             try {
-                var geojson = this._toGeoJSON();
-                if (!geojson) return false;
+                // Build closed ring coordinates for turf.polygon
+                var coords = this.state.vertices.map(function(v) {
+                    return [v.lng, v.lat];
+                });
+                coords.push(coords[0]); // Close the ring
 
-                var kinks = turf.kinks(geojson);
+                var polygon = turf.polygon([coords]);
+                var intersections = [];
 
+                // Primary method: turf.kinks()
+                var kinks = turf.kinks(polygon);
                 if (kinks.features.length > 0) {
-                    // Store intersection points
-                    this.state.intersectionPoints = kinks.features.map(function(f) {
+                    console.log('[GIS] Self-intersection detected via turf.kinks: ' + kinks.features.length + ' kink(s)');
+                    intersections = kinks.features.map(function(f) {
                         return {
-                            lat: f.geometry.coordinates[1],
-                            lng: f.geometry.coordinates[0]
+                            lng: f.geometry.coordinates[0],
+                            lat: f.geometry.coordinates[1]
                         };
                     });
+                }
 
-                    // Find and highlight intersecting edges
-                    this._highlightIntersectingEdges(kinks.features);
+                // Fallback method: sweepline-intersections (if turf.kinks found nothing)
+                if (intersections.length === 0 && typeof sweeplineIntersections !== 'undefined') {
+                    try {
+                        var sweeplineResult = sweeplineIntersections(polygon.geometry);
+                        if (sweeplineResult && sweeplineResult.length > 0) {
+                            console.log('[GIS] Self-intersection detected via sweepline: ' + sweeplineResult.length + ' intersection(s)');
+                            intersections = sweeplineResult.map(function(pt) {
+                                return {
+                                    lng: pt[0],
+                                    lat: pt[1]
+                                };
+                            });
+                        }
+                    } catch (sweepErr) {
+                        console.warn('[GIS] Sweepline fallback failed:', sweepErr);
+                    }
+                }
+
+                if (intersections.length > 0) {
+                    console.log('[GIS] Total intersections found: ' + intersections.length);
+
+                    // Store intersection points
+                    this.state.intersectionPoints = intersections;
+
+                    // Highlight intersection points
+                    this._highlightIntersectionPoints(intersections);
 
                     // Show warning
                     this._showWarning('intersection', 'Boundary lines are crossing. Adjust the corners to fix this.');
                     return true;
                 } else {
+                    console.log('[GIS] Self-intersection check: polygon is valid');
                     this._hideWarning('intersection');
                     return false;
                 }
             } catch (e) {
                 console.warn('[GISCapture] Self-intersection check failed:', e);
+                this._hideWarning('intersection');
                 return false;
             }
+        },
+
+        /**
+         * Check if two line segments intersect and return intersection point
+         * Uses cross-product based parametric line intersection algorithm
+         */
+        _lineSegmentIntersection: function(x1, y1, x2, y2, x3, y3, x4, y4) {
+            // Cross-product based line segment intersection
+            // Segment 1: (x1,y1) to (x2,y2)
+            // Segment 2: (x3,y3) to (x4,y4)
+            var denom = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3);
+            if (Math.abs(denom) < 1e-10) return null; // Parallel lines
+
+            var t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / denom;
+            var u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / denom;
+
+            console.log('[GIS DEBUG] Intersection check: t=' + t.toFixed(4) + ', u=' + u.toFixed(4));
+
+            // Check if intersection is within both line segments (exclusive of endpoints)
+            // Both t and u must be in (0,1) for intersection within segments
+            if (t > 0.0001 && t < 0.9999 && u > 0.0001 && u < 0.9999) {
+                console.log('[GIS DEBUG] INTERSECTION FOUND at t=' + t.toFixed(4) + ', u=' + u.toFixed(4));
+                return {
+                    lng: x1 + t * (x2 - x1),
+                    lat: y1 + t * (y2 - y1)
+                };
+            }
+            return null;
+        },
+
+        /**
+         * Self-test for intersection algorithms - runs on init to verify correctness
+         * Tests both turf.kinks() and sweepline-intersections fallback
+         */
+        _testSelfIntersection: function() {
+            var allPassed = true;
+
+            try {
+                // Test polygons
+                var bowtie = turf.polygon([[[0, 0], [1, 1], [1, 0], [0, 1], [0, 0]]]);
+                var square = turf.polygon([[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]);
+                var figure8 = turf.polygon([[[0, 0], [2, 2], [2, 0], [0, 2], [0, 0]]]);
+                var triangle = turf.polygon([[[0, 0], [1, 0], [0.5, 1], [0, 0]]]);
+
+                // Test turf.kinks()
+                var kinks1 = turf.kinks(bowtie);
+                var kinks2 = turf.kinks(square);
+                var kinks3 = turf.kinks(figure8);
+                var kinks4 = turf.kinks(triangle);
+
+                var p1 = kinks1.features.length === 1;
+                var p2 = kinks2.features.length === 0;
+                var p3 = kinks3.features.length === 1;
+                var p4 = kinks4.features.length === 0;
+
+                console.log('[GIS] turf.kinks() tests:');
+                console.log('[GIS]   Test 1 (bowtie - 1 kink): ' + (p1 ? 'PASS' : 'FAIL') + ' (found: ' + kinks1.features.length + ')');
+                console.log('[GIS]   Test 2 (square - 0 kinks): ' + (p2 ? 'PASS' : 'FAIL') + ' (found: ' + kinks2.features.length + ')');
+                console.log('[GIS]   Test 3 (figure-8 - 1 kink): ' + (p3 ? 'PASS' : 'FAIL') + ' (found: ' + kinks3.features.length + ')');
+                console.log('[GIS]   Test 4 (triangle - 0 kinks): ' + (p4 ? 'PASS' : 'FAIL') + ' (found: ' + kinks4.features.length + ')');
+
+                var turfPassed = p1 && p2 && p3 && p4;
+                console.log('[GIS]   turf.kinks result: ' + (turfPassed ? 'ALL PASSED' : 'SOME FAILED'));
+
+                // Test sweepline-intersections if available
+                if (typeof sweeplineIntersections !== 'undefined') {
+                    var sw1 = sweeplineIntersections(bowtie.geometry);
+                    var sw2 = sweeplineIntersections(square.geometry);
+                    var sw3 = sweeplineIntersections(figure8.geometry);
+                    var sw4 = sweeplineIntersections(triangle.geometry);
+
+                    var sp1 = sw1.length === 1;
+                    var sp2 = sw2.length === 0;
+                    var sp3 = sw3.length === 1;
+                    var sp4 = sw4.length === 0;
+
+                    console.log('[GIS] sweepline-intersections tests:');
+                    console.log('[GIS]   Test 1 (bowtie - 1 intersection): ' + (sp1 ? 'PASS' : 'FAIL') + ' (found: ' + sw1.length + ')');
+                    console.log('[GIS]   Test 2 (square - 0 intersections): ' + (sp2 ? 'PASS' : 'FAIL') + ' (found: ' + sw2.length + ')');
+                    console.log('[GIS]   Test 3 (figure-8 - 1 intersection): ' + (sp3 ? 'PASS' : 'FAIL') + ' (found: ' + sw3.length + ')');
+                    console.log('[GIS]   Test 4 (triangle - 0 intersections): ' + (sp4 ? 'PASS' : 'FAIL') + ' (found: ' + sw4.length + ')');
+
+                    var sweeplinePassed = sp1 && sp2 && sp3 && sp4;
+                    console.log('[GIS]   sweepline result: ' + (sweeplinePassed ? 'ALL PASSED' : 'SOME FAILED'));
+                    allPassed = turfPassed && sweeplinePassed;
+                } else {
+                    console.log('[GIS] sweepline-intersections not loaded, skipping fallback tests');
+                    allPassed = turfPassed;
+                }
+
+                console.log('[GIS] Self-intersection tests: ' + (allPassed ? 'ALL PASSED' : 'SOME FAILED'));
+            } catch (e) {
+                console.error('[GIS] Self-intersection test error:', e);
+                allPassed = false;
+            }
+
+            return allPassed;
+        },
+
+        /**
+         * Highlight intersection points on the map
+         */
+        _highlightIntersectionPoints: function(intersections) {
+            var self = this;
+            intersections.forEach(function(pt) {
+                var marker = L.circleMarker([pt.lat, pt.lng], {
+                    radius: 8,
+                    color: '#ff0000',
+                    fillColor: '#ff0000',
+                    fillOpacity: 0.8,
+                    weight: 2
+                }).addTo(self.drawingLayer);
+                self.intersectionMarkers.push(marker);
+            });
         },
 
         /**
@@ -2559,12 +2714,31 @@ var GISCapture = (function() {
                 warnings.push('Too many corners (' + metrics.vertexCount + '). Consider simplifying.');
             }
 
-            // Check self-intersection
+            // Check self-intersection using turf.kinks with sweepline fallback
             if (!validation.allowSelfIntersection) {
                 try {
                     var geojson = this._toGeoJSON();
+                    var hasIntersection = false;
+
+                    // Primary: turf.kinks()
                     var kinks = turf.kinks(geojson);
                     if (kinks.features.length > 0) {
+                        hasIntersection = true;
+                    }
+
+                    // Fallback: sweepline-intersections
+                    if (!hasIntersection && typeof sweeplineIntersections !== 'undefined') {
+                        try {
+                            var sweepResult = sweeplineIntersections(geojson.geometry);
+                            if (sweepResult && sweepResult.length > 0) {
+                                hasIntersection = true;
+                            }
+                        } catch (sweepErr) {
+                            console.warn('[GISCapture] Sweepline validation fallback failed:', sweepErr);
+                        }
+                    }
+
+                    if (hasIntersection) {
                         errors.push('Boundary lines are crossing');
                     }
                 } catch (e) {
@@ -2775,6 +2949,11 @@ var GISCapture = (function() {
                     console.log('[GIS]   isEditMode=' + !!isEditMode + ' (recordId=' + (self.options.recordId || 'none') + ')');
                     console.log('[GIS]   initialArea=' + (initialArea ? initialArea.toFixed(4) + ' ha' : 'not set'));
                     console.log('[GIS]   currentArea=' + (currentArea ? currentArea.toFixed(4) + ' ha' : 'not set'));
+                    if (initialArea && currentArea) {
+                        console.log('[GIS]   Polygon state: ' +
+                            (currentArea > initialArea ? 'EXPANDED' :
+                             currentArea < initialArea ? 'SHRUNK' : 'SAME SIZE'));
+                    }
 
                     if (isEditMode && currentArea) {
                         var originalOverlapCount = overlaps.length;
@@ -2800,6 +2979,38 @@ var GISCapture = (function() {
                                 if (areaDiff <= areaThreshold) {
                                     console.log('[GIS] Overlap area ≈ current area - filtering as self-overlap');
                                     return false;
+                                }
+                            }
+
+                            // Strategy 3: Polygon was EXPANDED - use spatial containment check
+                            // If current polygon CONTAINS the initial geometry, it's the same parcel being expanded
+                            if (isEditMode && self.state.initialGeometry && currentArea > initialArea) {
+                                try {
+                                    var currentGeojson = self._toGeoJSON();
+                                    var initialGeojson = self.state.initialGeometry;
+
+                                    // Check if current polygon fully contains the original
+                                    if (turf.booleanContains(currentGeojson, initialGeojson)) {
+                                        // The overlap area should be approximately the initial area
+                                        var areaDiffFromInitial = Math.abs(overlap.overlapArea - initialArea);
+                                        var initialThreshold = initialArea * 0.10; // 10% tolerance
+                                        if (areaDiffFromInitial <= initialThreshold) {
+                                            console.log('[GIS] Self-overlap filter: expanded polygon contains original geometry, ' +
+                                                'overlap area (' + overlap.overlapArea.toFixed(4) + ' ha) ≈ initial area (' +
+                                                initialArea.toFixed(4) + ' ha), filtering out');
+                                            return false;
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn('[GIS] Spatial containment check failed:', e);
+                                    // Fallback to simple area comparison
+                                    var areaDiffFromInitial = Math.abs(overlap.overlapArea - initialArea);
+                                    var initialThreshold = initialArea * 0.05;
+                                    if (areaDiffFromInitial <= initialThreshold) {
+                                        console.log('[GIS] Self-overlap filter (fallback): polygon expanded, ' +
+                                            'overlap area ≈ initial area, filtering out');
+                                        return false;
+                                    }
                                 }
                             }
 
@@ -4437,3 +4648,111 @@ var GISCapture = (function() {
     };
 
 })();
+
+// =============================================
+// DEBUG INTERFACE
+// =============================================
+/**
+ * GIS_DEBUG - Debug interface for testing self-intersection detection
+ *
+ * Usage in browser console:
+ *   GIS_DEBUG.createBowtie()  - Creates a guaranteed self-intersecting polygon
+ *   GIS_DEBUG.showVertices()  - Displays current vertex coordinates
+ */
+window.GIS_DEBUG = {
+    /**
+     * Create a guaranteed self-intersecting bowtie polygon for testing.
+     * The polygon is created around the current map center with edges that
+     * mathematically MUST cross (t=0.5, u=0.5).
+     */
+    createBowtie: function() {
+        var instance = window._gisInstance;
+        if (!instance) {
+            console.error('[GIS DEBUG] No GIS instance found');
+            return;
+        }
+
+        if (!instance.map) {
+            console.error('[GIS DEBUG] Map not initialized');
+            return;
+        }
+
+        var center = instance.map.getCenter();
+
+        // Create guaranteed bowtie around center
+        // V0 → V1: diagonal SE (top-left to bottom-right)
+        // V2 → V3: diagonal SW (top-right to bottom-left)
+        // These edges MUST cross at the center
+        instance.state.vertices = [
+            { lng: center.lng - 0.01, lat: center.lat + 0.01 },  // V0: top-left
+            { lng: center.lng + 0.01, lat: center.lat - 0.01 },  // V1: bottom-right
+            { lng: center.lng + 0.01, lat: center.lat + 0.01 },  // V2: top-right
+            { lng: center.lng - 0.01, lat: center.lat - 0.01 }   // V3: bottom-left
+        ];
+
+        // Update polygon display
+        if (typeof instance._updatePolygon === 'function') {
+            instance._updatePolygon();
+        }
+
+        // Update vertex markers
+        if (typeof instance._updateVertexMarkers === 'function') {
+            instance._updateVertexMarkers();
+        }
+
+        console.log('[GIS DEBUG] Created bowtie at center: ' + center.lng.toFixed(6) + ', ' + center.lat.toFixed(6));
+        console.log('[GIS DEBUG] Edges: E0(V0→V1) and E2(V2→V3) MUST cross at center');
+
+        // Verify with turf.kinks
+        var coords = instance.state.vertices.map(function(v) {
+            return [v.lng, v.lat];
+        });
+        coords.push(coords[0]); // Close the ring
+
+        try {
+            var polygon = turf.polygon([coords]);
+            var kinks = turf.kinks(polygon);
+            console.log('[GIS DEBUG] turf.kinks() found ' + kinks.features.length + ' intersection(s)');
+            if (kinks.features.length > 0) {
+                kinks.features.forEach(function(f, i) {
+                    console.log('[GIS DEBUG] Kink ' + i + ' at: ' + f.geometry.coordinates[0].toFixed(6) + ', ' + f.geometry.coordinates[1].toFixed(6));
+                });
+            }
+        } catch (e) {
+            console.error('[GIS DEBUG] turf.kinks() error:', e);
+        }
+
+        // Trigger self-intersection check
+        if (typeof instance._checkSelfIntersection === 'function') {
+            instance._checkSelfIntersection();
+        }
+    },
+
+    /**
+     * Display current vertex coordinates in the console.
+     */
+    showVertices: function() {
+        var instance = window._gisInstance;
+        if (!instance) {
+            console.error('[GIS DEBUG] No GIS instance found');
+            return;
+        }
+
+        if (!instance.state || !instance.state.vertices) {
+            console.log('[GIS DEBUG] No vertices defined');
+            return;
+        }
+
+        console.log('[GIS DEBUG] Current vertices (' + instance.state.vertices.length + '):');
+        instance.state.vertices.forEach(function(v, i) {
+            console.log('  V' + i + ': (' + v.lng.toFixed(6) + ', ' + v.lat.toFixed(6) + ')');
+        });
+    },
+
+    /**
+     * Get reference to the GIS instance for advanced debugging.
+     */
+    getInstance: function() {
+        return window._gisInstance;
+    }
+};
