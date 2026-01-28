@@ -223,6 +223,9 @@ public class GisPolygonCaptureElement extends Element implements FormBuilderPale
         // Record ID for edit mode (to exclude from overlap checking)
         dataModel.put("recordId", recordId);
 
+        // Cache busting version for JS/CSS resources
+        dataModel.put("gisCacheVersion", getVersion());
+
         // =================================================================
         // Phase 6: Render template
         // =================================================================
