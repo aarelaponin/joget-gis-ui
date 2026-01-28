@@ -93,13 +93,10 @@ public class GisResourcesPlugin extends ExtDefaultPlugin implements PluginWebSup
         response.setHeader("X-Content-Type-Options", "nosniff");
         response.setHeader("X-Frame-Options", "SAMEORIGIN");
 
-        // Set caching headers (1 year for versioned resources)
-        String version = request.getParameter("v");
-        if (version != null && !version.isEmpty()) {
-            response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-        } else {
-            response.setHeader("Cache-Control", "public, max-age=3600");
-        }
+        // Disable caching for debugging
+        response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
 
         // Load from classpath
         String resourcePath = "/static/" + decodedFile;

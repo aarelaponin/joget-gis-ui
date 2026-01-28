@@ -6,7 +6,7 @@
     <groupId>global.govstack</groupId>
     <artifactId>joget-gis-ui</artifactId>
     <packaging>bundle</packaging>
-    <version>8.1-SNAPSHOT</version>
+    <version>8.1.1-SNAPSHOT</version>
     <name>Joget GIS UI Plugin</name>
     <description>GIS Polygon Capture Form Element with Walk Mode (GPS) and Draw Mode (desktop)</description>
     <url>https://www.govstack.global</url>
